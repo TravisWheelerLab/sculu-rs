@@ -19,7 +19,7 @@ New method will use `rmblastn` (https://www.repeatmasker.org/rmblast/).
 
 NOTE: Transpose the matrices because `cross_match` and NCBI BLAST have different ideas about query/database matrix order.
 
-Download 
+Download Perl source code:
 
 * `RepeatModeler`: https://github.com/Dfam-consortium/RepeatModeler
 * `RepeatMasker`: https://www.repeatmasker.org/RepeatMasker/
@@ -113,7 +113,10 @@ Transitions / transversions = 2.67 (16/6)
 Gap_init rate = 0.08 (25 / 332), avg. gap size = 1.00 (25 / 25)
 ```
 
-These are all we care about right now, so:
+NOTE: The Python implementation next filters all the alignments for those "with scores that are 10 bits less than the maximum score of the region." Is this necessary?
+
+These alignment scores are all we care about right now.
+I can use Python module `csvkit` to look at the results:
 
 ```
 $ grep -E '^\d+\s+' test_set.fa.ali | awk 'BEGIN {OFS="\t"} {print $1, $5, $9}' > ali.scores
