@@ -47,6 +47,24 @@ Where:
 * _test_set.fa_: 50 representative sequences from AluY, AluYb8, and AluYm1 scattered across Hg38
 * _consensi.fa_: 10 consensus sequences for AluY, AluYa5, AluYb8, AluYb9, and AluYm1
 
+**Using Alu from Travis**:
+
+```
+export PERL5LIB=$HOME/work/RepeatMasker 
+perl $HOME/work/RepeatModeler/util/align.pl \
+-rmblast \
+-gap_init -25 \
+-extension -5 \
+-minmatch 7 \
+-bandwidth 14 \
+-masklevel 101 \
+-matrix $HOME/work/RepeatMasker/Matrices/ncbi/nt/25p41g.matrix \
+-minscore 200 \
+-alignments \
+data/alu/subfams/*.fa
+data/alu/alu_consensi.fa
+```
+
 The expectation is that each target (test_set) sequence will map to exactly one consensus sequence.
 
 The beginning of the output file _test_set.fa.ali_ shows how to run `rmblastn`:
@@ -137,41 +155,81 @@ $ head ali.scores | csvlook -H
 |   300 | AluY__hg38_chr10:116711986-116711654 | AluYb9 |
 ```
 
-I wrote a Python script to find the best score for each target:
+I wrote a Python script to find families that need to be merged:
 
 ```
-$ ./scripts/best-score.py -h
-usage: best-score.py [-h] FILE
-
-Find best score
-
-positional arguments:
-  FILE        Input file
-
-options:
-
 $ ./scripts/best-score.py ali.scores
-{'AluY': defaultdict(<class 'int'>,
-                     {'AluY': 2370,
-                      'AluYa5': 2294,
-                      'AluYb8': 2214,
-                      'AluYb9': 2191,
-                      'AluYm1': 2347}),
- 'AluYb8': defaultdict(<class 'int'>,
-                       {'AluY': 2449,
-                        'AluYa5': 2361,
-                        'AluYb8': 2663,
-                        'AluYb9': 2640,
-                        'AluYm1': 2426}),
- 'AluYm1': defaultdict(<class 'int'>,
-                       {'AluY': 2437,
-                        'AluYa5': 2349,
-                        'AluYb8': 2307,
-                        'AluYb9': 2303,
-                        'AluYm1': 2444})}
-target AluY       query AluY       score 2370
-target AluYb8     query AluYb8     score 2663
-target AluYm1     query AluYm1     score 2444
+...
+Clean Winners
+defaultdict(<class 'int'>, {'AluY': 37, 'AluYb8': 50, 'AluYm1': 36})
+
+Winning Sets
+defaultdict(<class 'int'>,
+            {('AluY', 'AluYa5'): 12,
+             ('AluY', 'AluYb8'): 6,
+             ('AluY', 'AluYm1'): 46,
+             ('AluYa5', 'AluYb8'): 6,
+             ('AluYa5', 'AluYm1'): 4})
+Independence AluYa5/AluYm1: 0.00
+Independence AluYa5/AluYb8: 0.00
+Independence AluYa5/AluY  : 0.00
+Independence AluYm1/AluY  : 0.44
+Independence AluY  /AluYm1: 0.45
+Independence AluY  /AluYa5: 0.76
+Independence AluY  /AluYb8: 0.86
+Independence AluYb8/AluY  : 0.89
+Independence AluYb8/AluYa5: 0.89
+Independence AluYm1/AluYa5: 0.90
+Independence AluY  /AluYb9: 1.00
+Independence AluYa5/AluYb9: 1.00
+Independence AluYb8/AluYb9: 1.00
+Independence AluYb8/AluYm1: 1.00
+Independence AluYb9/AluY  : 1.00
+Independence AluYb9/AluYa5: 1.00
+Independence AluYb9/AluYb8: 1.00
+Independence AluYb9/AluYm1: 1.00
+Independence AluYm1/AluYb8: 1.00
+Independence AluYm1/AluYb9: 1.00
+Done
+```
+
+Downsample to keep only the longest 100 instances for each family:
+
+```
+mkdir data/alu/longest_100
+for file in data/alu/subfams/*.fa; do 
+cargo run --bin sculu-downsample -- \
+-o data/alu/longest_100/$(basename $file) $file
+done
+```
+
+Randomly sample 50 from each set to select 100 for the input to the MSA:
+
+```
+mkdir data/alu/random_50
+for file in data/alu/longest_100/*; do 
+seqkit sample -n 50 -o data/alu/random_50/$(basename $file) $file
+done
+```
+
+Create a MSA (multiple sequence alignment)/consensus using the sequences from the least independent pair, e.g., AluYa5/AluYm1:
+
+```
+export PERL5LIB=$HOME/work/RepeatMasker 
+mkdir refiner
+cat data/alu/random_50/{AluYa5,AluYm1}.fa > refiner/tmp.fa
+$HOME/work/RepeatModeler/Refiner -threads 4 \
+--rmblast_dir $HOME/.local/bin refiner/tmp.fa
+```
+
+This generates:
+
+```
+$ ls -1 refiner
+tmp.fa
+tmp.fa.njs
+tmp.fa.refiner.stk  # MSA in Stockholm format
+tmp.fa.refiner_cons # Consensus sequence in FASTA format
 ```
 
 ## Authors

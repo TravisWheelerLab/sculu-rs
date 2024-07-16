@@ -1,5 +1,5 @@
 use clap::Parser;
-use sculu::{self, Args};
+use sculu::Args;
 
 // --------------------------------------------------
 fn main() {

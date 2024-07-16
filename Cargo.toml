@@ -5,4 +5,9 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
+assert_cmd = "2.0.14"
 clap = { version = "4.5.7", features = ["derive"] }
+itertools = "0.13.0"
+kseq = "0.5.3"
+regex = "1.10.5"
+tempfile = "3.10.1"

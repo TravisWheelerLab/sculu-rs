@@ -17,6 +17,7 @@ class Args(NamedTuple):
     """Command-line arguments"""
 
     file: TextIO
+    lambda_value: float
 
 
 # --------------------------------------------------
@@ -35,9 +36,19 @@ def get_args() -> Args:
         type=argparse.FileType("rt"),
     )
 
+    # TODO: Should be loaded from matrix?
+    parser.add_argument(
+        "-l",
+        "--lamb",
+        help="Lambda valuw",
+        metavar="LAMBDA",
+        type=float,
+        default=0.1227
+    )
+
     args = parser.parse_args()
 
-    return Args(args.file)
+    return Args(args.file, args.lamb)
 
 
 # --------------------------------------------------
@@ -62,8 +73,7 @@ def main() -> None:
             scores[target][query] = max([score, scores[target][query]])
 
     print("TARGET/QUERY")
-    # pprint(scores)
-    lamb = 0.1227  # Should be loaded from matrix?
+    pprint(scores)
     clear_winners = defaultdict(int)
     winning_sets = defaultdict(int)
 
@@ -72,7 +82,7 @@ def main() -> None:
         families = list(bit_scores.keys())
         print(families)
         print(list(bit_scores.values()))
-        conf = mk_conf(bit_scores.values(), lamb)
+        conf = mk_conf(bit_scores.values(), args.lambda_value)
         print(list(map(lambda v: f"{v:0.04f}", conf)))
         pos = list(range(len(conf)))
         all_comps = []
@@ -113,11 +123,22 @@ def main() -> None:
     print('Winning Sets')
     pprint(winning_sets)
 
+    independence = []
     for f1, f2 in permutations(families, 2):
         ind = 1
-        if num_shared := winning_sets[tuple(sorted([f1, f2]))]:
+        num_shared = winning_sets[tuple(sorted([f1, f2]))]
+
+        if num_shared > 0:
             num_wins = clear_winners[f1]
             ind = num_wins / (num_wins + num_shared)
+
+        print(f"ind {ind} f1 {f1} f2 {f2} "
+              f"num_shared {num_shared} num_wins {num_wins}")
+
+        # num_shared is used to break ties
+        independence.append((ind, num_shared, f1, f2))
+
+    for ind, _, f1, f2 in sorted(independence):
         print(f'Independence {f1:6}/{f2:6}: {ind:0.02f}')
 
     print("Done")
