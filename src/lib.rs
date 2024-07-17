@@ -1,15 +1,17 @@
 use anyhow::{anyhow, bail, Result};
 use assert_cmd::Command;
 use clap::Parser;
+use csv::{ReaderBuilder, WriterBuilder};
 use itertools::Itertools;
 use kseq::parse_reader;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::{
     cmp,
     collections::HashMap,
-    fs::File,
+    fs::{self, File},
     io::{BufReader, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 //use tempfile::NamedTempFile;
 
@@ -25,6 +27,10 @@ pub struct Args {
     #[arg(long, value_name = "INSTANCES", required = true, num_args=1..)]
     pub instances: Vec<String>,
 
+    /// Output directory
+    #[arg(short, long, value_name = "OUTDIR", default_value = "sculu-out")]
+    pub outdir: PathBuf,
+
     /// PERL5LIB, e.g., to find RepeatMasker/RepeatModeler
     #[arg(long, value_name = "PERL5LIB")]
     pub perl5lib: Option<String>,
@@ -38,21 +44,37 @@ pub struct Args {
     pub lambda: f64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct AlignmentScore {
+    score: u32,
+    target: String,
+    query: String,
+}
+
 // --------------------------------------------------
 pub fn run(args: Args) -> Result<()> {
     dbg!(&args);
-    let _align_res = align(&args)?;
+    if !args.outdir.is_dir() {
+        fs::create_dir_all(&args.outdir)?;
+    }
+    let scores_file = align(&args)?;
+    dbg!(&scores_file);
+
+    //let scores_file = PathBuf::from("sculu-out/alignment-scores.tsv");
+    let res = process_alignment(&scores_file, &args)?;
+    dbg!(&res);
     Ok(())
 }
 
 // --------------------------------------------------
-fn align(args: &Args) -> Result<()> {
+fn align(args: &Args) -> Result<PathBuf> {
     //let mut all_seqs = NamedTempFile::new()?;
     //let all_seqs_path = &all_seqs.path().to_str().unwrap();
 
-    let all_seqs_path = "all_seqs.fa";
-    let mut all_seqs = File::create(all_seqs_path)?;
-    println!("Writing to {all_seqs_path}");
+    // All the input sequences need to be in one file
+    let all_seqs_path = args.outdir.join("all_seqs.fa");
+    let mut all_seqs = File::create(&all_seqs_path)?;
+    println!("Writing to {}", &all_seqs_path.display());
     for filename in &args.instances {
         let file = BufReader::new(
             File::open(filename).map_err(|e| anyhow!("{}: {e}", filename))?,
@@ -64,6 +86,7 @@ fn align(args: &Args) -> Result<()> {
             .to_string_lossy()
             .to_string();
         while let Some(rec) = reader.iter_record()? {
+            // TODO: Remove prefix of basename?
             writeln!(
                 all_seqs,
                 ">{}__{}{}\n{}",
@@ -92,7 +115,7 @@ fn align(args: &Args) -> Result<()> {
         "-minscore",
         "200",
         "-alignments",
-        all_seqs_path,
+        &all_seqs_path.to_string_lossy().to_string(),
         &args.consensus,
     ];
     println!("{} {:?}", args.aligner, align_args);
@@ -111,9 +134,19 @@ fn align(args: &Args) -> Result<()> {
     if !res.status.success() {
         bail!(String::from_utf8(res.stderr)?);
     }
-    let stdout = String::from_utf8(res.stdout)?;
 
-    let mut scores: HashMap<String, HashMap<String, u32>> = HashMap::new();
+    // TODO: Is there a way to avoid reading the entire
+    // alignment into memory and then converting to a String?
+    // Should I run the command to redirect process output
+    // to a file and read that?
+    let stdout = String::from_utf8(res.stdout)?;
+    let scores_file = args.outdir.join("alignment-scores.tsv");
+    let mut wtr = WriterBuilder::new()
+        .has_headers(true)
+        .delimiter(b'\t')
+        .from_path(&scores_file)?;
+
+    // Take only the score lines that start with an integer
     let starts_with_score = Regex::new(r"^\d+\s").unwrap();
     let spaces = Regex::new(r"\s+").unwrap();
     for line in stdout.split('\n') {
@@ -123,17 +156,38 @@ fn align(args: &Args) -> Result<()> {
                 let score: u32 = parts[0].parse()?;
                 let target = parts[4].to_string();
                 let query = parts[8].to_string();
-                // println!("target {target} query {query} score {score}");
-
-                let tscore = scores.entry(target).or_insert(HashMap::new());
-                tscore
-                    .entry(query)
-                    .and_modify(|v| *v = cmp::max(score, *v))
-                    .or_insert(score);
+                wtr.serialize(AlignmentScore {
+                    score,
+                    target,
+                    query,
+                })?;
             }
         }
     }
-    //println!("{scores:#?}");
+
+    Ok(scores_file)
+}
+
+// --------------------------------------------------
+fn process_alignment(scores_file: &PathBuf, args: &Args) -> Result<()> {
+    println!("scores_file {}", scores_file.display());
+    let mut reader = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(true)
+        .from_path(scores_file)?;
+    let mut records = reader.deserialize();
+
+    let mut scores: HashMap<String, HashMap<String, u32>> = HashMap::new();
+    while let Some(res) = records.next() {
+        let rec: AlignmentScore = res?;
+        println!("rec {:?}", rec);
+        let tscore = scores.entry(rec.target).or_insert(HashMap::new());
+        tscore
+            .entry(rec.query)
+            .and_modify(|v| *v = cmp::max(rec.score, *v))
+            .or_insert(rec.score);
+    }
+    println!("{scores:#?}");
 
     let mut clear_winners: HashMap<String, u32> = HashMap::new();
     let mut winning_sets: HashMap<String, HashMap<String, u32>> =
