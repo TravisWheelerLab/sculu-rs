@@ -203,7 +203,7 @@ cargo run --bin sculu-downsample -- \
 done
 ```
 
-Randomly sample 50 from each set to select 100 for the input to the MSA:
+Randomly sample 50 from each set for the input to the MSA:
 
 ```
 mkdir data/alu/random_50
