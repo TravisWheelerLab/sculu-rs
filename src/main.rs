@@ -4,7 +4,7 @@ use sculu::Args;
 // --------------------------------------------------
 fn main() {
     if let Err(e) = sculu::run(Args::parse()) {
-        eprintln!("{e}");
+        eprintln!("Error: {e}");
         std::process::exit(1);
     }
 }

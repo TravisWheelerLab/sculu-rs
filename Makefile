@@ -4,15 +4,19 @@ run:
 	cargo run --bin sculu -- \
 		--debug \
 		--perl5lib /Users/kyclark/work/RepeatMasker \
+		--refiner /Users/kyclark/work/RepeatModeler/Refiner \
+		--rmblast-dir /Users/kyclark/.local/bin \
 		--aligner /Users/kyclark/work/RepeatModeler/util/align.pl \
 		--alignment-matrix $(MATRIX) \
 		--consensus tests/inputs/consensi.fa \
 		--instances tests/inputs/instances/*.fa
 
-run2:
+alu:
 	cargo run --bin sculu -- \
 		--debug \
 		--perl5lib /Users/kyclark/work/RepeatMasker \
+		--refiner /Users/kyclark/work/RepeatModeler/Refiner \
+		--rmblast-dir /Users/kyclark/.local/bin \
 		--aligner /Users/kyclark/work/RepeatModeler/util/align.pl \
 		--alignment-matrix $(MATRIX) \
 		--consensus data/alu/alu_consensi.fa \
