@@ -261,7 +261,6 @@ fn align(args: &Args, instances_100: &Vec<PathBuf>) -> Result<PathBuf> {
     }
 
     let alignment_outfile = args.outdir.join("alignment.txt");
-    //let mut output = File::create(&alignment_outfile)?;
     let mut output = open_for_write(&alignment_outfile)?;
     output.write_all(&res.stdout)?;
 
@@ -353,15 +352,6 @@ fn check_family_instances(
         );
     }
 
-    // Return all the family instance names
-    let mut family_names: Vec<String> =
-        instance_names.iter().cloned().collect();
-    family_names.sort();
-
-    let mut instance_files: Vec<PathBuf> =
-        args.instances.iter().cloned().collect();
-    instance_files.sort();
-
     Ok(fam_to_file)
 }
 
@@ -372,10 +362,11 @@ fn extract_scores(alignment_file: &PathBuf, args: &Args) -> Result<PathBuf> {
         alignment_file.display()
     );
 
-    let file = BufReader::new(
-        File::open(&alignment_file)
-            .map_err(|e| anyhow!("{}: {e}", &alignment_file.display()))?,
-    );
+    let file = open(&alignment_file)?;
+    //let file = BufReader::new(
+    //    File::open(&alignment_file)
+    //        .map_err(|e| anyhow!("{}: {e}", &alignment_file.display()))?,
+    //);
 
     let scores_file = args.outdir.join("alignment-scores.tsv");
     let mut wtr = WriterBuilder::new()
@@ -612,17 +603,14 @@ fn merge_families(
     let outdir = args.outdir.join("msa");
     fs::create_dir_all(&outdir)?;
 
-    let msa_input = outdir.join(format!("msa-input.fa"));
+    let msa_input = outdir.join("msa-input.fa");
     let mut output = open_for_write(&msa_input)?;
     for &fam in &[family1, family2] {
         let fasta = fam_to_file.get(fam).unwrap();
         downsample(fasta, &mut output)?;
     }
 
-    let mut cmd = Command::new(&args.refiner);
-    if let Some(perl5lib) = &args.perl5lib {
-        cmd.env("PERL5LIB", perl5lib);
-    }
+    //TODO: Make threads value a parameter?
     let mut refiner_args = vec!["-threads".to_string(), "4".to_string()];
     if let Some(rmblast_dir) = &args.rmblast_dir {
         refiner_args.extend_from_slice(&[
@@ -635,6 +623,10 @@ fn merge_families(
     debug!(r#"Running "{} {}""#, &args.refiner, &refiner_args.join(" "));
 
     // TODO: This is failing ATM
+    //let mut cmd = Command::new(&args.refiner);
+    //if let Some(perl5lib) = &args.perl5lib {
+    //    cmd.env("PERL5LIB", perl5lib);
+    //}
     //let res = cmd.args(refiner_args).output()?;
     //if !res.status.success() {
     //    bail!(String::from_utf8(res.stderr)?);
@@ -657,7 +649,7 @@ fn merge_families(
     // Print the consensus sequence to the new consensi file
     let new_consensi_path = outdir.join("new-consensi.fa");
     let mut new_consensi = open_for_write(&new_consensi_path)?;
-    writeln!(new_consensi, ">{family1}-{family2}\n{consensus_seq}")?;
+    writeln!(new_consensi, ">{family1}::{family2}\n{consensus_seq}")?;
 
     // Add the other original consensi
     let mut orig_consensi = parse_reader(open(&args.consensus)?)?;
@@ -1050,7 +1042,7 @@ mod tests {
             ),
         ]);
 
-        let res = independence(clear_winners, winning_sets);
+        let res = independence(clear_winners, winning_sets, 0.5);
         assert!(res.is_ok());
         Ok(())
     }
