@@ -1,10 +1,10 @@
 use anyhow::{anyhow, bail, Result};
 use assert_cmd::Command;
-use clap::Parser;
+use clap::{builder::PossibleValue, Parser, ValueEnum};
 use csv::{ReaderBuilder, WriterBuilder};
 use itertools::Itertools;
 use kseq::parse_reader;
-use log::debug;
+use log::{debug, info};
 use rand::{seq::SliceRandom, thread_rng};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -13,10 +13,9 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
     io::{BufRead, BufReader, BufWriter, Write},
-    path::{absolute, Path, PathBuf},
+    path::{Path, PathBuf},
     time::Instant,
 };
-//use tempfile::NamedTempFile;
 
 /// SCULU subfamily clustering tool
 #[derive(Debug, Parser)]
@@ -82,9 +81,28 @@ pub struct Args {
     #[arg(long, value_name = "MINSCORE", default_value = "200")]
     pub align_min_score: i64,
 
-    /// Debug mode
+    /// Log level
     #[arg(short, long)]
-    pub debug: bool,
+    pub log: Option<LogLevel>,
+}
+
+#[derive(Debug, Clone)]
+pub enum LogLevel {
+    Info,
+    Debug,
+}
+
+impl ValueEnum for LogLevel {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[LogLevel::Info, LogLevel::Debug]
+    }
+
+    fn to_possible_value<'a>(&self) -> Option<PossibleValue> {
+        Some(match self {
+            LogLevel::Info => PossibleValue::new("info"),
+            LogLevel::Debug => PossibleValue::new("debug"),
+        })
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -109,14 +127,14 @@ struct Independence {
 pub fn run(mut args: Args) -> Result<()> {
     let start = Instant::now();
     env_logger::Builder::new()
-        .filter_level(if args.debug {
-            log::LevelFilter::Debug
-        } else {
-            log::LevelFilter::Off
+        .filter_level(match args.log {
+            Some(LogLevel::Debug) => log::LevelFilter::Debug,
+            Some(LogLevel::Info) => log::LevelFilter::Info,
+            _ => log::LevelFilter::Off,
         })
         .init();
 
-    debug!("args = {args:?}");
+    info!("args = {args:#?}");
     if !args.outdir.is_dir() {
         fs::create_dir_all(&args.outdir)?;
     }
@@ -125,13 +143,28 @@ pub fn run(mut args: Args) -> Result<()> {
     let independence_threshold = 0.5;
 
     // Take the longest 100 of the instances
-    let instances_100 = take_longest_100(&args)?;
-    dbg!(&instances_100);
+    let instances_100_dir = args.outdir.join("instances_100");
+    fs::create_dir_all(&instances_100_dir)?;
+    let instances_100 = take_longest_100(&args, &instances_100_dir)?;
+    debug!("instances_100 = {instances_100:#?}");
 
     // Check that the "consensus" sequences have clear
     // relationships to "instances" files to create "families"
     let family_to_path = check_family_instances(&args, &instances_100)?;
-    dbg!(&family_to_path);
+    debug!("family_to_path = {family_to_path:#?}");
+
+    // Concatenate the longest 100 into a single file for alignment
+    let all_seqs_path = &args.outdir.join("all_seqs.fa");
+    cat_sequences(&instances_100, &all_seqs_path)?;
+
+    // BLAST chokes on long identifiers, so give the consensi
+    // sequences integer IDs and move the names to the desc
+    let consensi_path = args.outdir.join("consensi.fa");
+    number_consensi(&args.consensus, &consensi_path)?;
+    args = Args {
+        consensus: consensi_path,
+        ..args
+    };
 
     let top_outdir = args.outdir.clone();
     for round in 1.. {
@@ -141,7 +174,7 @@ pub fn run(mut args: Args) -> Result<()> {
         fs::create_dir_all(&args.outdir)?;
 
         // Align longest 100 to the consensi
-        let alignment_file = align(&args, &instances_100)?;
+        let alignment_file = align(&args, &all_seqs_path)?;
 
         // Extract the scores from the alignment file
         //let scores_file = PathBuf::from("sculu-out/alignment-scores.tsv");
@@ -162,17 +195,23 @@ pub fn run(mut args: Args) -> Result<()> {
         )?;
 
         // Merge the least independent families
-        if let Some(least_ind) = ind_vals.first() {
-            debug!(
-                "Merge {}/{} ({})",
-                least_ind.f1, least_ind.f2, least_ind.val
-            );
-            let new_consensi = merge_families(
-                &least_ind.f1,
-                &least_ind.f2,
-                &args,
-                &family_to_path,
+        if let Some(least) = ind_vals.first() {
+            // The raw names may be "Fam1::Fam2::Fam2""
+            let raw_names = get_family_names_from_consensi(
+                &args.consensus,
+                &[&least.f1, &least.f2],
             )?;
+
+            let mut families = vec![];
+            for fam in raw_names {
+                let mut fams: Vec<String> =
+                    fam.split("::").map(Into::into).collect();
+                families.append(&mut fams);
+            }
+
+            info!("Merge {} ({:0.04})", families.join(", "), least.val);
+            let new_consensi =
+                merge_families(&families, &args, &family_to_path)?;
 
             args = Args {
                 consensus: new_consensi,
@@ -180,6 +219,7 @@ pub fn run(mut args: Args) -> Result<()> {
             };
         } else {
             // TODO: Add a check for max # of rounds to break?
+            println!("No families to merge.");
             break;
         }
     }
@@ -194,32 +234,7 @@ pub fn run(mut args: Args) -> Result<()> {
 }
 
 // --------------------------------------------------
-fn align(args: &Args, instances_100: &Vec<PathBuf>) -> Result<PathBuf> {
-    // Concatente all input sequences to one file
-    let all_seqs_path = args.outdir.join("all_seqs.fa");
-    let mut all_seqs = open_for_write(&all_seqs_path)?;
-
-    for filename in instances_100.iter() {
-        let mut reader = parse_reader(open(filename)?)?;
-        let basename = Path::new(filename)
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-
-        while let Some(rec) = reader.iter_record()? {
-            // TODO: Remove prefix of basename?
-            writeln!(
-                all_seqs,
-                ">{}__{}{}\n{}",
-                basename,
-                rec.head(),
-                rec.des(),
-                rec.seq()
-            )?;
-        }
-    }
-
+fn align(args: &Args, all_seqs_path: &PathBuf) -> Result<PathBuf> {
     // Perform alignment to query
     let mut align_args = vec![
         "-rmblast".to_string(),
@@ -248,7 +263,7 @@ fn align(args: &Args, instances_100: &Vec<PathBuf>) -> Result<PathBuf> {
         args.consensus.to_string_lossy().to_string(),
     ]);
 
-    debug!(r#"Running "{} {}""#, args.aligner, align_args.join(" "));
+    info!(r#"Running "{} {}""#, args.aligner, align_args.join(" "));
 
     let mut cmd = Command::new(&args.aligner);
     if let Some(perl5lib) = &args.perl5lib {
@@ -356,8 +371,37 @@ fn check_family_instances(
 }
 
 // --------------------------------------------------
+fn downsample(fasta: &PathBuf, mut output: impl Write) -> Result<()> {
+    // Assumes FASTA file contains 100 longest sequences
+    let mut reader = parse_reader(open(fasta)?)?;
+
+    // Randomly pick 50 record positions
+    let mut rng = thread_rng();
+    let range: Vec<usize> = (0..100).collect();
+    let mut take: Vec<usize> =
+        range.choose_multiple(&mut rng, 50).cloned().collect();
+    take.sort();
+    take.reverse();
+
+    let mut next_take = take.pop().unwrap();
+    let mut i = 0;
+    while let Some(rec) = reader.iter_record()? {
+        if i == next_take {
+            writeln!(output, ">{}{}\n{}", rec.head(), rec.des(), rec.seq())?;
+            match take.pop() {
+                Some(val) => next_take = val,
+                _ => break,
+            }
+        }
+        i += 1;
+    }
+
+    Ok(())
+}
+
+// --------------------------------------------------
 fn extract_scores(alignment_file: &PathBuf, args: &Args) -> Result<PathBuf> {
-    debug!(
+    info!(
         r#"Extracting scores from alignment "{}""#,
         alignment_file.display()
     );
@@ -402,7 +446,7 @@ fn call_winners(
     scores_file: &PathBuf,
     args: &Args,
 ) -> Result<(HashMap<String, u32>, HashMap<String, HashMap<String, u32>>)> {
-    debug!(
+    info!(
         r#"Calling winners from scores file "{}""#,
         scores_file.display()
     );
@@ -538,6 +582,26 @@ fn find_min_len(filename: &PathBuf, number: usize) -> Result<usize> {
 }
 
 // --------------------------------------------------
+fn get_family_names_from_consensi(
+    consensi: &PathBuf,
+    ids: &[&str],
+) -> Result<Vec<String>> {
+    let mut reader = parse_reader(open(&consensi)?)?;
+    let mut consensi_names: HashMap<String, String> = HashMap::new();
+    while let Some(rec) = reader.iter_record()? {
+        consensi_names.insert(
+            rec.head().trim().to_string(),
+            rec.des().trim().to_string(),
+        );
+    }
+
+    Ok(ids
+        .iter()
+        .flat_map(|&id| consensi_names.get(id).map(|v| v.to_string()))
+        .collect::<Vec<_>>())
+}
+
+// --------------------------------------------------
 fn independence(
     clear_winners: HashMap<String, u32>,
     winning_sets: HashMap<String, HashMap<String, u32>>,
@@ -594,43 +658,52 @@ fn independence(
 
 // --------------------------------------------------
 fn merge_families(
-    family1: &str,
-    family2: &str,
+    families: &Vec<String>,
     args: &Args,
     fam_to_file: &HashMap<String, PathBuf>,
 ) -> Result<PathBuf> {
-    debug!("Merging {family1}/{family2}");
     let outdir = args.outdir.join("msa");
     fs::create_dir_all(&outdir)?;
 
     let msa_input = outdir.join("msa-input.fa");
-    let mut output = open_for_write(&msa_input)?;
-    for &fam in &[family1, family2] {
-        let fasta = fam_to_file.get(fam).unwrap();
-        downsample(fasta, &mut output)?;
+    {
+        // Block to isolate "output" and force
+        // close when passing out of scope
+        let mut output = open_for_write(&msa_input)?;
+        for fam in families {
+            let fasta = fam_to_file.get(fam).unwrap();
+            downsample(fasta, &mut output)?;
+        }
     }
 
     //TODO: Make threads value a parameter?
     let mut refiner_args = vec!["-threads".to_string(), "4".to_string()];
+
+    match args.log {
+        Some(LogLevel::Debug) => refiner_args.push("-debug".to_string()),
+        _ => (),
+    }
+
     if let Some(rmblast_dir) = &args.rmblast_dir {
         refiner_args.extend_from_slice(&[
             "--rmblast_dir".to_string(),
             rmblast_dir.to_string(),
         ]);
     }
-    refiner_args.push(absolute(msa_input)?.to_string_lossy().to_string());
-    //refiner_args.push(msa_input.to_string_lossy().to_string());
-    debug!(r#"Running "{} {}""#, &args.refiner, &refiner_args.join(" "));
+
+    refiner_args.push(msa_input.to_string_lossy().to_string());
+    info!(r#"Running "{} {}""#, &args.refiner, &refiner_args.join(" "));
 
     // TODO: This is failing ATM
-    //let mut cmd = Command::new(&args.refiner);
-    //if let Some(perl5lib) = &args.perl5lib {
-    //    cmd.env("PERL5LIB", perl5lib);
-    //}
-    //let res = cmd.args(refiner_args).output()?;
-    //if !res.status.success() {
-    //    bail!(String::from_utf8(res.stderr)?);
-    //}
+    let mut cmd = Command::new(&args.refiner);
+    if let Some(perl5lib) = &args.perl5lib {
+        cmd.env("PERL5LIB", perl5lib);
+    }
+    let res = cmd.args(refiner_args).output()?;
+    if !res.status.success() {
+        debug!("{}", String::from_utf8(res.stdout)?);
+        bail!(String::from_utf8(res.stderr)?);
+    }
 
     let consensus_path = &outdir.join("msa-input.fa.refiner_cons");
     if !consensus_path.exists() {
@@ -649,53 +722,47 @@ fn merge_families(
     // Print the consensus sequence to the new consensi file
     let new_consensi_path = outdir.join("new-consensi.fa");
     let mut new_consensi = open_for_write(&new_consensi_path)?;
-    writeln!(new_consensi, ">{family1}::{family2}\n{consensus_seq}")?;
+    writeln!(new_consensi, ">0 {}\n{consensus_seq}", &families.join("::"))?;
+
+    let mut merge_fams: HashSet<String> = HashSet::new();
+    for fam in families {
+        merge_fams.insert(fam.to_string());
+    }
 
     // Add the other original consensi
     let mut orig_consensi = parse_reader(open(&args.consensus)?)?;
+    let mut i = 1;
     while let Some(rec) = orig_consensi.iter_record()? {
-        // Skip the two families we merged
-        let id = rec.head();
-        if id == family1 || id == family2 {
-            continue;
+        // Skip the families we merged
+        let mut seq_fams: HashSet<String> = HashSet::new();
+        for fam in rec.des().trim().split("::") {
+            seq_fams.insert(fam.to_string());
         }
 
-        writeln!(
-            new_consensi,
-            ">{}{}\n{}",
-            rec.head(),
-            rec.des(),
-            rec.seq()
-        )?;
+        let common: HashSet<_> = merge_fams.intersection(&seq_fams).collect();
+        if common.is_empty() {
+            writeln!(
+                new_consensi,
+                ">{i} {}\n{}",
+                rec.des().trim(),
+                rec.seq()
+            )?;
+        }
+        i += 1;
     }
 
-    debug!(r#"New consensi "{}""#, new_consensi_path.display());
+    info!(r#"New consensi "{}""#, new_consensi_path.display());
     Ok(new_consensi_path)
 }
 
 // --------------------------------------------------
-fn downsample(fasta: &PathBuf, mut output: impl Write) -> Result<()> {
-    // Assumes FASTA file contains 100 longest sequences
-    let mut reader = parse_reader(open(fasta)?)?;
-
-    // Randomly pick 50 record positions
-    let mut rng = thread_rng();
-    let range: Vec<usize> = (0..100).collect();
-    let mut take: Vec<usize> =
-        range.choose_multiple(&mut rng, 50).cloned().collect();
-    take.sort();
-    take.reverse();
-
-    let mut next_take = take.pop().unwrap();
+fn number_consensi(consensi: &PathBuf, outpath: &PathBuf) -> Result<()> {
+    let mut outfile = open_for_write(outpath)?;
+    let mut reader = parse_reader(open(&consensi)?)?;
     let mut i = 0;
+
     while let Some(rec) = reader.iter_record()? {
-        if i == next_take {
-            writeln!(output, ">{}{}\n{}", rec.head(), rec.des(), rec.seq())?;
-            match take.pop() {
-                Some(val) => next_take = val,
-                _ => break,
-            }
-        }
+        writeln!(outfile, ">{i} {}\n{}", rec.head(), rec.seq())?;
         i += 1;
     }
 
@@ -717,15 +784,11 @@ fn open_for_write(filename: &PathBuf) -> Result<Box<dyn Write>> {
 }
 
 // --------------------------------------------------
-fn take_longest_100(args: &Args) -> Result<Vec<PathBuf>> {
-    debug!("Taking longest 100");
+fn take_longest_100(args: &Args, outdir: &PathBuf) -> Result<Vec<PathBuf>> {
+    info!("Taking longest 100");
 
     // TODO: Make a parameter?
     let limit = 100;
-
-    // Put subsampled sequences into outdir
-    let outdir = args.outdir.join("instances_100");
-    fs::create_dir_all(&outdir)?;
 
     let mut ret = vec![];
     for file in &args.instances {
@@ -760,16 +823,46 @@ fn take_longest_100(args: &Args) -> Result<Vec<PathBuf>> {
 }
 
 // --------------------------------------------------
+fn cat_sequences(inputs: &Vec<PathBuf>, outpath: &PathBuf) -> Result<()> {
+    let mut output = open_for_write(outpath)?;
+    for filename in inputs.iter() {
+        let mut reader = parse_reader(open(filename)?)?;
+        let basename = Path::new(filename)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        while let Some(rec) = reader.iter_record()? {
+            // TODO: Remove prefix of basename?
+            writeln!(
+                output,
+                ">{}__{}{}\n{}",
+                basename,
+                rec.head(),
+                rec.des(),
+                rec.seq()
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+// --------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::{
-        align, bitscore_to_confidence, call_winners, check_family_instances,
-        extract_scores, independence, Args,
+        align, bitscore_to_confidence, call_winners, cat_sequences,
+        check_family_instances, extract_scores,
+        get_family_names_from_consensi, independence, number_consensi, open,
+        Args,
     };
     use anyhow::Result;
+    use kseq::parse_reader;
     use pretty_assertions::assert_eq;
     use std::{collections::HashMap, fs, path::PathBuf};
-    use tempfile::tempdir;
+    use tempfile::{tempdir, NamedTempFile};
 
     // Or "tests/inputs/25p41g.matrix"?
     const MATRIX: &str =
@@ -797,6 +890,31 @@ mod tests {
     }
 
     #[test]
+    fn test_cat_sequences() -> Result<()> {
+        let outdir = tempdir()?;
+        let inputs = vec![
+            PathBuf::from("tests/inputs/instances_100/AluY.fa"),
+            PathBuf::from("tests/inputs/instances_100/AluYa5.fa"),
+            PathBuf::from("tests/inputs/instances_100/AluYb8.fa"),
+            PathBuf::from("tests/inputs/instances_100/AluYb9.fa"),
+            PathBuf::from("tests/inputs/instances_100/AluYm1.fa"),
+        ];
+        let outpath = outdir.path().join("all_seqs.fa");
+        let res = cat_sequences(&inputs, &outpath);
+        assert!(res.is_ok());
+        assert!(outpath.exists());
+
+        let mut reader = parse_reader(open(&outpath)?)?;
+        let mut count = 0;
+        while let Some(_) = reader.iter_record()? {
+            count += 1;
+        }
+        assert_eq!(count, 500);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_align() -> Result<()> {
         let outdir = tempdir()?;
 
@@ -819,16 +937,10 @@ mod tests {
             align_bandwidth: 14,
             align_mask_level: 101,
             align_min_score: 200,
-            debug: false,
+            log: None,
         };
-        let instances = vec![
-            PathBuf::from("tests/inputs/instances_100/AluY.fa"),
-            PathBuf::from("tests/inputs/instances_100/AluYa5.fa"),
-            PathBuf::from("tests/inputs/instances_100/AluYb8.fa"),
-            PathBuf::from("tests/inputs/instances_100/AluYb9.fa"),
-            PathBuf::from("tests/inputs/instances_100/AluYm1.fa"),
-        ];
-        let res = align(&args, &instances);
+        let all_seqs_path = PathBuf::from("tests/inputs/all_seqs.fa");
+        let res = align(&args, &all_seqs_path);
         assert!(res.is_ok());
 
         let alignment_file = res.unwrap();
@@ -864,7 +976,7 @@ mod tests {
             align_bandwidth: 14,
             align_mask_level: 101,
             align_min_score: 200,
-            debug: false,
+            log: None,
         };
 
         let instances_100 = vec![PathBuf::from(
@@ -936,7 +1048,7 @@ mod tests {
             align_bandwidth: 14,
             align_mask_level: 101,
             align_min_score: 200,
-            debug: false,
+            log: None,
         };
 
         let alignment_file = PathBuf::from("tests/inputs/alignment.txt");
@@ -976,7 +1088,7 @@ mod tests {
             align_bandwidth: 14,
             align_mask_level: 101,
             align_min_score: 200,
-            debug: false,
+            log: None,
         };
         let res = call_winners(&scores_file, &args);
         assert!(res.is_ok());
@@ -1044,6 +1156,34 @@ mod tests {
 
         let res = independence(clear_winners, winning_sets, 0.5);
         assert!(res.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_family_names_from_consensi() -> Result<()> {
+        let numbered = PathBuf::from("tests/outputs/numbered_consensi.fa");
+        let res = get_family_names_from_consensi(&numbered, &["1", "3"]);
+        assert!(res.is_ok());
+
+        assert_eq!(
+            res.unwrap(),
+            vec!["AluYb8".to_string(), "AluYa5".to_string()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_number_consensi() -> Result<()> {
+        let orig_consensi = PathBuf::from("tests/inputs/consensi.fa");
+        let outpath = NamedTempFile::new()?;
+        let res = number_consensi(&orig_consensi, &outpath.path().into());
+        assert!(res.is_ok());
+
+        let actual = fs::read_to_string(outpath)?;
+        let expected =
+            fs::read_to_string("tests/outputs/numbered_consensi.fa")?;
+        assert_eq!(actual, expected);
+
         Ok(())
     }
 }

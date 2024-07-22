@@ -2,7 +2,7 @@ MATRIX = /Users/kyclark/work/RepeatMasker/Matrices/ncbi/nt/25p41g.matrix
 
 run:
 	cargo run --bin sculu -- \
-		--debug \
+		--log debug \
 		--perl5lib /Users/kyclark/work/RepeatMasker \
 		--refiner /Users/kyclark/work/RepeatModeler/Refiner \
 		--rmblast-dir /Users/kyclark/.local/bin \
@@ -13,7 +13,8 @@ run:
 
 alu:
 	cargo run --bin sculu -- \
-		--debug \
+		--log info \
+		--outdir ./sculu-alu \
 		--perl5lib /Users/kyclark/work/RepeatMasker \
 		--refiner /Users/kyclark/work/RepeatModeler/Refiner \
 		--rmblast-dir /Users/kyclark/.local/bin \
