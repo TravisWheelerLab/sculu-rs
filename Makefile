@@ -31,3 +31,6 @@ filter:
 
 scores:
 	./scripts/best-score.py ali.scores
+
+clean:
+	rm -rf RM_*

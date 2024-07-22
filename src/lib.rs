@@ -119,9 +119,14 @@ struct Independence {
     val: f64,
 }
 
-// TODO: Use type alias?
-//type ClearWinnerSet = HashMap<String, u32>;
-//type UnclearWinnerSet = HashMap<String, HashMap<String, u32>>;
+#[derive(Debug, Eq, PartialEq, Hash)]
+struct StringPair(String, String);
+
+#[derive(Debug)]
+struct Winners {
+    clear_winners: HashMap<String, u32>,
+    winning_sets: HashMap<StringPair, u32>,
+}
 
 // --------------------------------------------------
 pub fn run(mut args: Args) -> Result<()> {
@@ -181,18 +186,14 @@ pub fn run(mut args: Args) -> Result<()> {
         let scores_file = extract_scores(&alignment_file, &args)?;
 
         // Find the winners from the scores
-        let (clear_winners, winning_sets) =
-            call_winners(&scores_file, &args)?;
+        //let (clear_winners, winning_sets) =
+        let winners = call_winners(&scores_file, &args)?;
 
         // Find the independence of the families
         // TODO: Only return where val < .5?
         // Independent pairs will have a "val" of 1
         // Find the pairs with less than 50% chance of independence
-        let ind_vals = independence(
-            clear_winners,
-            winning_sets,
-            independence_threshold,
-        )?;
+        let ind_vals = independence(winners, independence_threshold)?;
 
         // Merge the least independent families
         if let Some(least) = ind_vals.first() {
@@ -407,11 +408,6 @@ fn extract_scores(alignment_file: &PathBuf, args: &Args) -> Result<PathBuf> {
     );
 
     let file = open(&alignment_file)?;
-    //let file = BufReader::new(
-    //    File::open(&alignment_file)
-    //        .map_err(|e| anyhow!("{}: {e}", &alignment_file.display()))?,
-    //);
-
     let scores_file = args.outdir.join("alignment-scores.tsv");
     let mut wtr = WriterBuilder::new()
         .has_headers(true)
@@ -441,11 +437,7 @@ fn extract_scores(alignment_file: &PathBuf, args: &Args) -> Result<PathBuf> {
 }
 
 // --------------------------------------------------
-//) -> Result<(ClearWinnerSet, UnclearWinnerSet)> {
-fn call_winners(
-    scores_file: &PathBuf,
-    args: &Args,
-) -> Result<(HashMap<String, u32>, HashMap<String, HashMap<String, u32>>)> {
+fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
     info!(
         r#"Calling winners from scores file "{}""#,
         scores_file.display()
@@ -468,8 +460,7 @@ fn call_winners(
     }
 
     let mut clear_winners: HashMap<String, u32> = HashMap::new();
-    let mut winning_sets: HashMap<String, HashMap<String, u32>> =
-        HashMap::new();
+    let mut winning_sets: HashMap<StringPair, u32> = HashMap::new();
     for (target, bit_scores) in scores.iter() {
         debug!("\n>>> {target}");
         let families: Vec<_> = bit_scores.keys().collect();
@@ -535,10 +526,9 @@ fn call_winners(
                 pair.sort();
                 match pair[..] {
                     [&f1, &f2] => {
-                        let w1 = winning_sets
-                            .entry(f1.to_string())
-                            .or_insert(HashMap::new());
-                        w1.entry(f2.to_string())
+                        let key = StringPair(f1.to_string(), f2.to_string());
+                        winning_sets
+                            .entry(key)
                             .and_modify(|v| *v += 1)
                             .or_insert(1);
                     }
@@ -551,7 +541,10 @@ fn call_winners(
     debug!("Clear Winners = {clear_winners:?}");
     debug!("Winning Sets = {winning_sets:?}");
 
-    Ok((clear_winners, winning_sets))
+    Ok(Winners {
+        clear_winners,
+        winning_sets,
+    })
 }
 
 // --------------------------------------------------
@@ -603,29 +596,25 @@ fn get_family_names_from_consensi(
 
 // --------------------------------------------------
 fn independence(
-    clear_winners: HashMap<String, u32>,
-    winning_sets: HashMap<String, HashMap<String, u32>>,
+    winners: Winners,
     threshold: f64,
 ) -> Result<Vec<Independence>> {
     let mut families: HashSet<&str> = HashSet::new();
-    for (f1, h) in winning_sets.iter() {
-        families.insert(f1);
-        for f2 in h.keys() {
-            families.insert(f2);
-        }
+    for StringPair(f1, f2) in winners.winning_sets.keys() {
+        families.insert(&f1);
+        families.insert(&f2);
     }
 
     let mut vals = vec![];
     for pair in families.into_iter().permutations(2) {
         match pair[..] {
             [f1, f2] => {
-                let num_shared = winning_sets
-                    .get(f1)
-                    .map_or(0u32, |v| *v.get(f2).unwrap_or(&0u32));
-
+                let key = StringPair(f1.to_string(), f2.to_string());
+                let &num_shared =
+                    winners.winning_sets.get(&key).unwrap_or(&0u32);
                 let ind = if num_shared > 0 {
                     let num_wins =
-                        *clear_winners.get(f1).unwrap_or(&0) as f64;
+                        *winners.clear_winners.get(f1).unwrap_or(&0) as f64;
                     num_wins / (num_wins + num_shared as f64)
                 } else {
                     1.
@@ -795,7 +784,7 @@ fn take_longest_100(args: &Args, outdir: &PathBuf) -> Result<Vec<PathBuf>> {
         let min_length = find_min_len(&file, 100)?;
         let outfile = outdir.join(&file.file_name().unwrap());
         let mut output = open_for_write(&outfile)?;
-        let mut reader = parse_reader(open(&file)?)?;
+        let mut reader = parse_reader(open(file)?)?;
         let mut taken = 0;
 
         while let Some(rec) = reader.iter_record()? {
@@ -823,7 +812,7 @@ fn take_longest_100(args: &Args, outdir: &PathBuf) -> Result<Vec<PathBuf>> {
 }
 
 // --------------------------------------------------
-fn cat_sequences(inputs: &Vec<PathBuf>, outpath: &PathBuf) -> Result<()> {
+fn cat_sequences(inputs: &[PathBuf], outpath: &PathBuf) -> Result<()> {
     let mut output = open_for_write(outpath)?;
     for filename in inputs.iter() {
         let mut reader = parse_reader(open(filename)?)?;
@@ -856,7 +845,7 @@ mod tests {
         align, bitscore_to_confidence, call_winners, cat_sequences,
         check_family_instances, extract_scores,
         get_family_names_from_consensi, independence, number_consensi, open,
-        Args,
+        Args, StringPair, Winners,
     };
     use anyhow::Result;
     use kseq::parse_reader;
@@ -1093,10 +1082,10 @@ mod tests {
         let res = call_winners(&scores_file, &args);
         assert!(res.is_ok());
 
-        let (clear_winners, winning_sets) = res.unwrap();
+        let winners = res.unwrap();
 
         assert_eq!(
-            clear_winners,
+            winners.clear_winners,
             HashMap::from([
                 ("AluY".to_string(), 37),
                 ("AluYm1".to_string(), 36),
@@ -1105,23 +1094,13 @@ mod tests {
         );
 
         assert_eq!(
-            winning_sets,
+            winners.winning_sets,
             HashMap::from([
-                (
-                    "AluYa5".to_string(),
-                    HashMap::from([
-                        ("AluYb8".to_string(), 6u32),
-                        ("AluYm1".to_string(), 4u32),
-                    ]),
-                ),
-                (
-                    "AluY".to_string(),
-                    HashMap::from([
-                        ("AluYb8".to_string(), 6),
-                        ("AluYa5".to_string(), 12),
-                        ("AluYm1".to_string(), 46),
-                    ]),
-                ),
+                (StringPair("AluYa5".to_string(), "AluYb8".to_string()), 6),
+                (StringPair("AluYa5".to_string(), "AluYm1".to_string()), 4),
+                (StringPair("AluY".to_string(), "AluYb8".to_string()), 6),
+                (StringPair("AluY".to_string(), "AluYa5".to_string()), 12),
+                (StringPair("AluY".to_string(), "AluYm1".to_string()), 46)
             ])
         );
 
@@ -1137,24 +1116,20 @@ mod tests {
         ]);
 
         let winning_sets = HashMap::from([
-            (
-                "AluYa5".to_string(),
-                HashMap::from([
-                    ("AluYb8".to_string(), 6u32),
-                    ("AluYm1".to_string(), 4u32),
-                ]),
-            ),
-            (
-                "AluY".to_string(),
-                HashMap::from([
-                    ("AluYb8".to_string(), 6),
-                    ("AluYa5".to_string(), 12),
-                    ("AluYm1".to_string(), 46),
-                ]),
-            ),
+            (StringPair("AluYa5".to_string(), "AluYb8".to_string()), 6),
+            (StringPair("AluYa5".to_string(), "AluYm1".to_string()), 4),
+            (StringPair("AluY".to_string(), "AluYb8".to_string()), 6),
+            (StringPair("AluY".to_string(), "AluYa5".to_string()), 12),
+            (StringPair("AluY".to_string(), "AluYm1".to_string()), 46),
         ]);
 
-        let res = independence(clear_winners, winning_sets, 0.5);
+        let res = independence(
+            Winners {
+                clear_winners,
+                winning_sets,
+            },
+            0.5,
+        );
         assert!(res.is_ok());
         Ok(())
     }
