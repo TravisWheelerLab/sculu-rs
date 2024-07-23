@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Result};
 use assert_cmd::Command;
 use clap::{builder::PossibleValue, Parser, ValueEnum};
 use csv::{ReaderBuilder, WriterBuilder};
+use format_num::NumberFormat;
 use itertools::Itertools;
 use kseq::parse_reader;
 use log::{debug, info};
@@ -37,6 +38,14 @@ pub struct Args {
     #[arg(long, value_name = "LAMBDA", default_value = "0.1227")]
     pub lambda: f64,
 
+    /// Independence threshold
+    #[arg(long, value_name = "IND", default_value = "0.5")]
+    pub independence_threshold: f64,
+
+    /// Confidence margin
+    #[arg(long, value_name = "CONF", default_value = "0.33")]
+    pub confidence_margin: f64,
+
     /// Path to RepeatModeler/util/align.pl
     #[arg(long, value_name = "ALIGNER")]
     pub aligner: String,
@@ -44,6 +53,10 @@ pub struct Args {
     /// Path to RepeatModeler/Refiner
     #[arg(long, value_name = "REFINER")]
     pub refiner: String,
+
+    /// Number of threads for rmblastn/Refiner
+    #[arg(long, value_name = "THREADS", default_value = "4")]
+    pub threads: usize,
 
     /// PERL5LIB, e.g., to find RepeatMasker/RepeatModeler
     #[arg(long, value_name = "PERL5LIB")]
@@ -144,85 +157,122 @@ pub fn run(mut args: Args) -> Result<()> {
         fs::create_dir_all(&args.outdir)?;
     }
 
-    // TODO: Make this a parameter?
-    let independence_threshold = 0.5;
-
     // Take the longest 100 of the instances
     let instances_100_dir = args.outdir.join("instances_100");
+    info!("Writing longest 100 to '{}'", instances_100_dir.display());
     fs::create_dir_all(&instances_100_dir)?;
     let instances_100 = take_longest_100(&args, &instances_100_dir)?;
     debug!("instances_100 = {instances_100:#?}");
 
     // Check that the "consensus" sequences have clear
     // relationships to "instances" files to create "families"
+    info!("Checking family names/instances");
     let family_to_path = check_family_instances(&args, &instances_100)?;
     debug!("family_to_path = {family_to_path:#?}");
 
     // Concatenate the longest 100 into a single file for alignment
     let all_seqs_path = &args.outdir.join("all_seqs.fa");
-    cat_sequences(&instances_100, &all_seqs_path)?;
+    info!(
+        "Concatenating all instance sequences into '{}'",
+        all_seqs_path.display()
+    );
+    cat_sequences(&instances_100, all_seqs_path)?;
 
     // BLAST chokes on long identifiers, so give the consensi
     // sequences integer IDs and move the names to the desc
-    let consensi_path = args.outdir.join("consensi.fa");
-    number_consensi(&args.consensus, &consensi_path)?;
-    args = Args {
-        consensus: consensi_path,
-        ..args
-    };
-
     let top_outdir = args.outdir.clone();
-    for round in 1.. {
-        println!("\n>>> Round {round} <<<");
+    let round0_dir = top_outdir.join(format!("round000"));
+    fs::create_dir_all(&round0_dir)?;
+    let consensi_path = round0_dir.join("consensi.fa");
+    info!(
+        "Writing consensus sequences to '{}'",
+        consensi_path.display()
+    );
+    number_consensi(&args.consensus, &consensi_path)?;
+    args.consensus = consensi_path;
 
-        args.outdir = top_outdir.join(format!("round_{round:03}"));
+    let mut orig_scores: Option<PathBuf> = None;
+    for round in 1.. {
+        info!("\n>>> Round {round} <<<");
+
+        args.outdir = top_outdir.join(format!("round{round:03}"));
         fs::create_dir_all(&args.outdir)?;
 
         // Align longest 100 to the consensi
-        let alignment_file = align(&args, &all_seqs_path)?;
+        let alignment_file = align(&args, all_seqs_path)?;
 
         // Extract the scores from the alignment file
-        //let scores_file = PathBuf::from("sculu-out/alignment-scores.tsv");
-        let scores_file = extract_scores(&alignment_file, &args)?;
+        let scores_file =
+            extract_scores(&alignment_file, &orig_scores, &args)?;
+
+        // Save the first alignment scores for future calls
+        if orig_scores.is_none() {
+            orig_scores = Some(scores_file.clone());
+        }
 
         // Find the winners from the scores
-        //let (clear_winners, winning_sets) =
         let winners = call_winners(&scores_file, &args)?;
 
-        // Find the independence of the families
-        // TODO: Only return where val < .5?
-        // Independent pairs will have a "val" of 1
-        // Find the pairs with less than 50% chance of independence
-        let ind_vals = independence(winners, independence_threshold)?;
+        // Find the pairs with independence below the threshold
+        let non_independent =
+            independence(winners, args.independence_threshold)?;
 
-        // Merge the least independent families
-        if let Some(least) = ind_vals.first() {
-            // The raw names may be "Fam1::Fam2::Fam2""
-            let raw_names = get_family_names_from_consensi(
-                &args.consensus,
-                &[&least.f1, &least.f2],
-            )?;
+        info!("{} family pair not independent.", non_independent.len());
 
-            let mut families = vec![];
-            for fam in raw_names {
-                let mut fams: Vec<String> =
-                    fam.split("::").map(Into::into).collect();
-                families.append(&mut fams);
-            }
-
-            info!("Merge {} ({:0.04})", families.join(", "), least.val);
-            let new_consensi =
-                merge_families(&families, &args, &family_to_path)?;
-
-            args = Args {
-                consensus: new_consensi,
-                ..args
-            };
-        } else {
-            // TODO: Add a check for max # of rounds to break?
-            println!("No families to merge.");
+        // Stop the loop when they are all independent
+        if non_independent.is_empty() {
             break;
         }
+
+        // Merge the least independent families
+        // The new consensi file will only contain the merged
+        // sequences. When extracting the scores, we'll pass the
+        // original score file that contains the unmerged sequences.
+        let new_consensi_path = args.outdir.join("new-consensi.fa");
+        let mut new_consensi = open_for_write(&new_consensi_path)?;
+        let mut merge_num = 0;
+        let mut merged: HashSet<String> = HashSet::new();
+        for pair in non_independent {
+            // Each pair may be a combo like "Fam1::Fam2"
+            let families: Vec<_> = vec![&pair.f1, &pair.f2]
+                .iter()
+                .flat_map(|v| {
+                    v.split("::").map(Into::into).collect::<Vec<_>>()
+                })
+                .collect();
+
+            // We might see Fam1->Fam2 and later Fam2->Fam1
+            // Or we might later see Fam1->Fam3
+            // Only merge a family once
+            if families.iter().map(|f| merged.contains(f)).any(|v| v) {
+                info!("Already merged one of {}", families.join(", "));
+                continue;
+            }
+
+            info!(
+                "{:>4}: Merge {} ({:0.04})",
+                merge_num + 1,
+                families.join(", "),
+                pair.val
+            );
+
+            let new_consensus =
+                merge_families(merge_num, &families, &args, &family_to_path)?;
+
+            writeln!(
+                new_consensi,
+                ">{merge_num} {}\n{new_consensus}",
+                &families.join("::")
+            )?;
+
+            for family in families {
+                merged.insert(family);
+            }
+            merge_num += 1;
+        }
+
+        info!(r#"New consensi "{}""#, new_consensi_path.display());
+        args.consensus = new_consensi_path;
     }
 
     println!(
@@ -235,10 +285,12 @@ pub fn run(mut args: Args) -> Result<()> {
 }
 
 // --------------------------------------------------
-fn align(args: &Args, all_seqs_path: &PathBuf) -> Result<PathBuf> {
+fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
     // Perform alignment to query
     let mut align_args = vec![
         "-rmblast".to_string(),
+        "-threads".to_string(),
+        args.threads.to_string(),
         "-gap_init".to_string(),
         args.align_gap_init.to_string(),
         "-extension".to_string(),
@@ -264,6 +316,7 @@ fn align(args: &Args, all_seqs_path: &PathBuf) -> Result<PathBuf> {
         args.consensus.to_string_lossy().to_string(),
     ]);
 
+    let start = Instant::now();
     info!(r#"Running "{} {}""#, args.aligner, align_args.join(" "));
 
     let mut cmd = Command::new(&args.aligner);
@@ -275,6 +328,11 @@ fn align(args: &Args, all_seqs_path: &PathBuf) -> Result<PathBuf> {
     if !res.status.success() {
         bail!(String::from_utf8(res.stderr)?);
     }
+    let num = NumberFormat::new();
+    info!(
+        "Finished in {} seconds",
+        num.format(",.0", start.elapsed().as_secs() as f64)
+    );
 
     let alignment_outfile = args.outdir.join("alignment.txt");
     let mut output = open_for_write(&alignment_outfile)?;
@@ -284,11 +342,9 @@ fn align(args: &Args, all_seqs_path: &PathBuf) -> Result<PathBuf> {
 }
 
 // --------------------------------------------------
-fn bitscore_to_confidence(vals: &Vec<&u32>, lambda: f64) -> Result<Vec<f64>> {
-    let converted: Vec<_> = vals
-        .into_iter()
-        .map(|&&v| (v as f64 * lambda).exp2())
-        .collect();
+fn bitscore_to_confidence(vals: &[&u32], lambda: f64) -> Result<Vec<f64>> {
+    let converted: Vec<_> =
+        vals.iter().map(|&&v| (v as f64 * lambda).exp2()).collect();
     let total: f64 = converted.iter().sum();
     if total > 0. {
         Ok(converted.into_iter().map(|v| v / total).collect())
@@ -313,10 +369,10 @@ fn check_family_instances(
 
     let mut dups: Vec<_> = consensi_names
         .iter()
-        .flat_map(|(name, &count)| (count > 1).then(|| name))
+        .flat_map(|(name, &count)| (count > 1).then_some(name))
         .collect();
 
-    if dups.len() > 0 {
+    if !dups.is_empty() {
         // Have to sort for tests
         dups.sort();
         bail!(
@@ -328,10 +384,10 @@ fn check_family_instances(
     let consensi_names: HashSet<String> =
         consensi_names.keys().cloned().collect();
 
-    let mut fam_to_file: HashMap<String, PathBuf> = HashMap::new();
+    let mut family_to_file: HashMap<String, PathBuf> = HashMap::new();
     for instance in instances_100 {
         match instance.file_stem() {
-            Some(stem) => fam_to_file
+            Some(stem) => family_to_file
                 .insert(stem.to_string_lossy().to_string(), instance.clone()),
             _ => bail!(
                 "Cannot get filename from {}",
@@ -341,12 +397,12 @@ fn check_family_instances(
     }
 
     let instance_names: HashSet<String> =
-        fam_to_file.keys().cloned().collect();
+        family_to_file.keys().cloned().collect();
 
     let missing_instances: HashSet<_> =
         consensi_names.difference(&instance_names).collect();
 
-    if missing_instances.len() > 0 {
+    if !missing_instances.is_empty() {
         let mut missing_instances: Vec<_> =
             missing_instances.iter().collect();
         missing_instances.sort();
@@ -359,7 +415,7 @@ fn check_family_instances(
     let missing_consensi: HashSet<_> =
         instance_names.difference(&consensi_names).collect();
 
-    if missing_consensi.len() > 0 {
+    if !missing_consensi.is_empty() {
         let mut missing_consensi: Vec<_> = missing_consensi.iter().collect();
         missing_consensi.sort();
         bail!(
@@ -368,7 +424,7 @@ fn check_family_instances(
         );
     }
 
-    Ok(fam_to_file)
+    Ok(family_to_file)
 }
 
 // --------------------------------------------------
@@ -401,13 +457,26 @@ fn downsample(fasta: &PathBuf, mut output: impl Write) -> Result<()> {
 }
 
 // --------------------------------------------------
-fn extract_scores(alignment_file: &PathBuf, args: &Args) -> Result<PathBuf> {
+fn extract_scores(
+    alignment_file: &PathBuf,
+    orig_scores_file: &Option<PathBuf>,
+    args: &Args,
+) -> Result<PathBuf> {
     info!(
         r#"Extracting scores from alignment "{}""#,
         alignment_file.display()
     );
 
-    let file = open(&alignment_file)?;
+    let mut reader = parse_reader(open(&args.consensus)?)?;
+    let mut consensi_names: HashMap<String, String> = HashMap::new();
+    while let Some(rec) = reader.iter_record()? {
+        consensi_names.insert(
+            rec.head().trim().to_string(),
+            rec.des().trim().to_string(),
+        );
+    }
+
+    let file = open(alignment_file)?;
     let scores_file = args.outdir.join("alignment-scores.tsv");
     let mut wtr = WriterBuilder::new()
         .has_headers(true)
@@ -417,6 +486,7 @@ fn extract_scores(alignment_file: &PathBuf, args: &Args) -> Result<PathBuf> {
     // Take only the score lines that start with an integer
     let starts_with_score = Regex::new(r"^\d+\s").unwrap();
     let spaces = Regex::new(r"\s+").unwrap();
+    let mut skip_query: HashSet<String> = HashSet::new();
     for line in file.lines().map_while(Result::ok) {
         if starts_with_score.is_match(&line) {
             let parts: Vec<_> = spaces.split(&line).collect();
@@ -424,11 +494,36 @@ fn extract_scores(alignment_file: &PathBuf, args: &Args) -> Result<PathBuf> {
                 let score: u32 = parts[0].parse()?;
                 let target = parts[4].to_string();
                 let query = parts[8].to_string();
-                wtr.serialize(AlignmentScore {
-                    score,
-                    target,
-                    query,
-                })?;
+                match consensi_names.get(&query) {
+                    Some(query_name) => {
+                        for family in query_name.split("::") {
+                            skip_query.insert(family.to_string());
+                        }
+
+                        wtr.serialize(AlignmentScore {
+                            score,
+                            target,
+                            query: query_name.clone(),
+                        })?
+                    }
+                    _ => eprintln!("Cannot find query '{query}'"),
+                }
+            }
+        }
+    }
+
+    // Add all the original scores for queries not yet merged
+    if let Some(orig_scores) = orig_scores_file {
+        let mut reader = ReaderBuilder::new()
+            .delimiter(b'\t')
+            .has_headers(true)
+            .from_path(orig_scores)?;
+        let records = reader.deserialize();
+
+        for res in records {
+            let rec: AlignmentScore = res?;
+            if !skip_query.contains(&rec.query) {
+                wtr.serialize(rec)?;
             }
         }
     }
@@ -447,13 +542,15 @@ fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
         .delimiter(b'\t')
         .has_headers(true)
         .from_path(scores_file)?;
-    let mut records = reader.deserialize();
+    let records = reader.deserialize();
 
     let mut scores: HashMap<String, HashMap<String, u32>> = HashMap::new();
-    while let Some(res) = records.next() {
+
+    for res in records {
         let rec: AlignmentScore = res?;
-        let tscore = scores.entry(rec.target).or_insert(HashMap::new());
-        tscore
+        scores
+            .entry(rec.target)
+            .or_default()
             .entry(rec.query)
             .and_modify(|v| *v = cmp::max(rec.score, *v))
             .or_insert(rec.score);
@@ -485,8 +582,10 @@ fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
                 .take(others.len())
                 .zip(others)
                 .collect();
-            let comps: Vec<_> =
-                pairs.iter().map(|(x, y)| (x * 0.3) > *y as f64).collect();
+            let comps: Vec<_> = pairs
+                .iter()
+                .map(|(x, y)| (x * args.confidence_margin) > { *y })
+                .collect();
             all_comps.push(comps.iter().all(|&v| v));
             debug!(
                 "{:8} {:0.04} {:5} => {:?}",
@@ -496,10 +595,12 @@ fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
                 comps
             );
         }
+
         let winners: Vec<String> = families
             .iter()
             .zip(all_comps)
-            .filter_map(|(fam, win)| win.then(|| fam.to_string()))
+            .filter(|&(_, win)| win)
+            .map(|(fam, _)| fam.to_string())
             .collect();
 
         if winners.len() == 1 {
@@ -512,27 +613,24 @@ fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
         } else {
             let mut fam_comps: Vec<_> = conf.iter().zip(families).collect();
             fam_comps.sort_by(|a, b| {
-                b.0.partial_cmp(a.0).unwrap().then_with(|| a.1.cmp(&b.1))
+                b.0.partial_cmp(a.0).unwrap().then_with(|| a.1.cmp(b.1))
             });
             let (&top_conf, _) = fam_comps.first().unwrap();
-            let threshold = top_conf / 5.;
+            let threshold = top_conf * args.confidence_margin;
             let winning_set: Vec<_> = fam_comps
                 .iter()
-                .filter_map(|(&c, f)| (c > threshold).then(|| f))
+                .filter_map(|(&conf, fam)| (conf > threshold).then_some(fam))
                 .collect();
 
             debug!("Winning Set: {winning_set:?}");
             for mut pair in winning_set.into_iter().permutations(2) {
                 pair.sort();
-                match pair[..] {
-                    [&f1, &f2] => {
-                        let key = StringPair(f1.to_string(), f2.to_string());
-                        winning_sets
-                            .entry(key)
-                            .and_modify(|v| *v += 1)
-                            .or_insert(1);
-                    }
-                    _ => (),
+                if let [&f1, &f2] = pair[..] {
+                    let key = StringPair(f1.to_string(), f2.to_string());
+                    winning_sets
+                        .entry(key)
+                        .and_modify(|v| *v += 1)
+                        .or_insert(1);
                 }
             }
         }
@@ -549,7 +647,7 @@ fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
 
 // --------------------------------------------------
 fn find_min_len(filename: &PathBuf, number: usize) -> Result<usize> {
-    let mut reader = parse_reader(open(&filename)?)?;
+    let mut reader = parse_reader(open(filename)?)?;
     let mut count_by_len: HashMap<usize, usize> = HashMap::new();
     while let Some(rec) = reader.iter_record()? {
         let len = rec.seq().len();
@@ -565,7 +663,7 @@ fn find_min_len(filename: &PathBuf, number: usize) -> Result<usize> {
     for len in lengths {
         // Default will be to take all
         min_len = *len;
-        top_n += count_by_len.get(&len).unwrap_or(&0);
+        top_n += count_by_len.get(len).unwrap_or(&0);
         if top_n >= number {
             break;
         }
@@ -574,25 +672,31 @@ fn find_min_len(filename: &PathBuf, number: usize) -> Result<usize> {
     Ok(min_len)
 }
 
-// --------------------------------------------------
-fn get_family_names_from_consensi(
-    consensi: &PathBuf,
-    ids: &[&str],
-) -> Result<Vec<String>> {
-    let mut reader = parse_reader(open(&consensi)?)?;
-    let mut consensi_names: HashMap<String, String> = HashMap::new();
-    while let Some(rec) = reader.iter_record()? {
-        consensi_names.insert(
-            rec.head().trim().to_string(),
-            rec.des().trim().to_string(),
-        );
-    }
+// TODO: Remove
+//// --------------------------------------------------
+//fn get_family_names_from_consensi(
+//    consensi: &PathBuf,
+//    ids: &[&str],
+//) -> Result<Vec<String>> {
+//    let mut reader = parse_reader(open(consensi)?)?;
+//    let mut consensi_names: HashMap<String, String> = HashMap::new();
+//    while let Some(rec) = reader.iter_record()? {
+//        consensi_names.insert(
+//            rec.head().trim().to_string(),
+//            rec.des().trim().to_string(),
+//        );
+//    }
 
-    Ok(ids
-        .iter()
-        .flat_map(|&id| consensi_names.get(id).map(|v| v.to_string()))
-        .collect::<Vec<_>>())
-}
+//    Ok(ids
+//        .iter()
+//        .flat_map(|&id| {
+//            consensi_names
+//                .get(id)
+//                .map(|v| v.split("::").map(Into::into).collect::<Vec<_>>())
+//        })
+//        .flatten()
+//        .collect())
+//}
 
 // --------------------------------------------------
 fn independence(
@@ -601,34 +705,30 @@ fn independence(
 ) -> Result<Vec<Independence>> {
     let mut families: HashSet<&str> = HashSet::new();
     for StringPair(f1, f2) in winners.winning_sets.keys() {
-        families.insert(&f1);
-        families.insert(&f2);
+        families.insert(f1);
+        families.insert(f2);
     }
 
     let mut vals = vec![];
     for pair in families.into_iter().permutations(2) {
-        match pair[..] {
-            [f1, f2] => {
-                let key = StringPair(f1.to_string(), f2.to_string());
-                let &num_shared =
-                    winners.winning_sets.get(&key).unwrap_or(&0u32);
-                let ind = if num_shared > 0 {
-                    let num_wins =
-                        *winners.clear_winners.get(f1).unwrap_or(&0) as f64;
-                    num_wins / (num_wins + num_shared as f64)
-                } else {
-                    1.
-                };
+        if let [f1, f2] = pair[..] {
+            let key = StringPair(f1.to_string(), f2.to_string());
+            let &num_shared = winners.winning_sets.get(&key).unwrap_or(&0u32);
+            let ind = if num_shared > 0 {
+                let num_wins =
+                    *winners.clear_winners.get(f1).unwrap_or(&0) as f64;
+                num_wins / (num_wins + num_shared as f64)
+            } else {
+                1.
+            };
 
-                if ind < threshold {
-                    vals.push(Independence {
-                        f1: f1.to_string(),
-                        f2: f2.to_string(),
-                        val: ind,
-                    });
-                }
+            if ind < threshold {
+                vals.push(Independence {
+                    f1: f1.to_string(),
+                    f2: f2.to_string(),
+                    val: ind,
+                });
             }
-            _ => (),
         }
     }
 
@@ -647,11 +747,12 @@ fn independence(
 
 // --------------------------------------------------
 fn merge_families(
+    merge_num: usize,
     families: &Vec<String>,
     args: &Args,
-    fam_to_file: &HashMap<String, PathBuf>,
-) -> Result<PathBuf> {
-    let outdir = args.outdir.join("msa");
+    family_to_file: &HashMap<String, PathBuf>,
+) -> Result<String> {
+    let outdir = args.outdir.join(format!("msa-{merge_num:02}"));
     fs::create_dir_all(&outdir)?;
 
     let msa_input = outdir.join("msa-input.fa");
@@ -660,30 +761,28 @@ fn merge_families(
         // close when passing out of scope
         let mut output = open_for_write(&msa_input)?;
         for fam in families {
-            let fasta = fam_to_file.get(fam).unwrap();
+            let fasta = family_to_file.get(fam).unwrap_or_else(|| {
+                panic!("Missing instances for family '{fam}'")
+            });
             downsample(fasta, &mut output)?;
         }
     }
 
-    //TODO: Make threads value a parameter?
-    let mut refiner_args = vec!["-threads".to_string(), "4".to_string()];
-
-    match args.log {
-        Some(LogLevel::Debug) => refiner_args.push("-debug".to_string()),
-        _ => (),
+    let mut refiner_args =
+        vec!["-threads".to_string(), args.threads.to_string()];
+    if let Some(LogLevel::Debug) = args.log {
+        refiner_args.push("-debug".to_string())
     }
-
     if let Some(rmblast_dir) = &args.rmblast_dir {
         refiner_args.extend_from_slice(&[
             "--rmblast_dir".to_string(),
             rmblast_dir.to_string(),
         ]);
     }
-
     refiner_args.push(msa_input.to_string_lossy().to_string());
     info!(r#"Running "{} {}""#, &args.refiner, &refiner_args.join(" "));
 
-    // TODO: This is failing ATM
+    let start = Instant::now();
     let mut cmd = Command::new(&args.refiner);
     if let Some(perl5lib) = &args.perl5lib {
         cmd.env("PERL5LIB", perl5lib);
@@ -693,6 +792,11 @@ fn merge_families(
         debug!("{}", String::from_utf8(res.stdout)?);
         bail!(String::from_utf8(res.stderr)?);
     }
+    let num = NumberFormat::new();
+    info!(
+        "Finished in {} seconds",
+        num.format(",.0", start.elapsed().as_secs() as f64)
+    );
 
     let consensus_path = &outdir.join("msa-input.fa.refiner_cons");
     if !consensus_path.exists() {
@@ -702,52 +806,19 @@ fn merge_families(
         );
     }
 
-    let mut reader = parse_reader(open(&consensus_path)?)?;
+    let mut reader = parse_reader(open(consensus_path)?)?;
     let consensus_seq = reader
         .iter_record()?
         .map(|rec| rec.seq().to_string())
         .expect("Failed to read consensus file");
 
-    // Print the consensus sequence to the new consensi file
-    let new_consensi_path = outdir.join("new-consensi.fa");
-    let mut new_consensi = open_for_write(&new_consensi_path)?;
-    writeln!(new_consensi, ">0 {}\n{consensus_seq}", &families.join("::"))?;
-
-    let mut merge_fams: HashSet<String> = HashSet::new();
-    for fam in families {
-        merge_fams.insert(fam.to_string());
-    }
-
-    // Add the other original consensi
-    let mut orig_consensi = parse_reader(open(&args.consensus)?)?;
-    let mut i = 1;
-    while let Some(rec) = orig_consensi.iter_record()? {
-        // Skip the families we merged
-        let mut seq_fams: HashSet<String> = HashSet::new();
-        for fam in rec.des().trim().split("::") {
-            seq_fams.insert(fam.to_string());
-        }
-
-        let common: HashSet<_> = merge_fams.intersection(&seq_fams).collect();
-        if common.is_empty() {
-            writeln!(
-                new_consensi,
-                ">{i} {}\n{}",
-                rec.des().trim(),
-                rec.seq()
-            )?;
-        }
-        i += 1;
-    }
-
-    info!(r#"New consensi "{}""#, new_consensi_path.display());
-    Ok(new_consensi_path)
+    Ok(consensus_seq)
 }
 
 // --------------------------------------------------
 fn number_consensi(consensi: &PathBuf, outpath: &PathBuf) -> Result<()> {
     let mut outfile = open_for_write(outpath)?;
-    let mut reader = parse_reader(open(&consensi)?)?;
+    let mut reader = parse_reader(open(consensi)?)?;
     let mut i = 0;
 
     while let Some(rec) = reader.iter_record()? {
@@ -767,13 +838,13 @@ fn open(filename: &PathBuf) -> Result<Box<dyn BufRead>> {
 
 // --------------------------------------------------
 fn open_for_write(filename: &PathBuf) -> Result<Box<dyn Write>> {
-    Ok(Box::new(BufWriter::new(File::create(&filename).map_err(
+    Ok(Box::new(BufWriter::new(File::create(filename).map_err(
         |e| anyhow!("Cannot write {}: {e}", filename.display()),
     )?)))
 }
 
 // --------------------------------------------------
-fn take_longest_100(args: &Args, outdir: &PathBuf) -> Result<Vec<PathBuf>> {
+fn take_longest_100(args: &Args, outdir: &Path) -> Result<Vec<PathBuf>> {
     info!("Taking longest 100");
 
     // TODO: Make a parameter?
@@ -781,8 +852,8 @@ fn take_longest_100(args: &Args, outdir: &PathBuf) -> Result<Vec<PathBuf>> {
 
     let mut ret = vec![];
     for file in &args.instances {
-        let min_length = find_min_len(&file, 100)?;
-        let outfile = outdir.join(&file.file_name().unwrap());
+        let min_length = find_min_len(file, 100)?;
+        let outfile = outdir.join(file.file_name().unwrap());
         let mut output = open_for_write(&outfile)?;
         let mut reader = parse_reader(open(file)?)?;
         let mut taken = 0;
@@ -916,6 +987,8 @@ mod tests {
             outdir: outdir.path().into(),
             perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
             lambda: 0.1227,
+            confidence_margin: 0.33,
+            independence_threshold: 0.5,
             aligner: "/Users/kyclark/work/RepeatModeler/util/align.pl"
                 .to_string(),
             refiner: "/Users/kyclark/work/RepeatModeler/Refiner".to_string(),
@@ -955,6 +1028,8 @@ mod tests {
             outdir: outdir.path().into(),
             perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
             lambda: 0.1227,
+            confidence_margin: 0.33,
+            independence_threshold: 0.5,
             aligner: "/Users/kyclark/work/RepeatModeler/util/align.pl"
                 .to_string(),
             refiner: "/Users/kyclark/work/RepeatModeler/Refiner".to_string(),
@@ -1027,6 +1102,8 @@ mod tests {
             outdir: outdir.path().into(),
             perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
             lambda: 0.1227,
+            confidence_margin: 0.33,
+            independence_threshold: 0.5,
             aligner: "/Users/kyclark/work/RepeatModeler/util/align.pl"
                 .to_string(),
             refiner: "/Users/kyclark/work/RepeatModeler/Refiner".to_string(),
@@ -1067,6 +1144,8 @@ mod tests {
             outdir: outdir.path().into(),
             perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
             lambda: 0.1227,
+            confidence_margin: 0.33,
+            independence_threshold: 0.5,
             aligner: "/Users/kyclark/work/RepeatModeler/util/align.pl"
                 .to_string(),
             refiner: "/Users/kyclark/work/RepeatModeler/Refiner".to_string(),

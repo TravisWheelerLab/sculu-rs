@@ -81,7 +81,7 @@ pub fn run(args: Args) -> Result<()> {
 
 // --------------------------------------------------
 fn find_min_len(filename: &str, number: &usize) -> Result<usize> {
-    let mut reader = parse_reader(open(&filename)?)?;
+    let mut reader = parse_reader(open(filename)?)?;
     let mut count_by_len: HashMap<usize, usize> = HashMap::new();
     while let Some(rec) = reader.iter_record()? {
         let len = rec.seq().len();
@@ -97,7 +97,7 @@ fn find_min_len(filename: &str, number: &usize) -> Result<usize> {
     for len in lengths {
         // Default will be to take all
         min_len = *len;
-        top_n += count_by_len.get(&len).unwrap_or(&0);
+        top_n += count_by_len.get(len).unwrap_or(&0);
         if &top_n >= number {
             break;
         }

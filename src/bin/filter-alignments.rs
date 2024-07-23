@@ -1,9 +1,5 @@
 use anyhow::Result;
 use clap::Parser;
-use std::{
-    fs::File,
-    io::{self, Write},
-};
 
 /// Filter alignments
 #[derive(Debug, Parser)]

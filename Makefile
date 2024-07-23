@@ -2,9 +2,10 @@ MATRIX = /Users/kyclark/work/RepeatMasker/Matrices/ncbi/nt/25p41g.matrix
 
 run:
 	cargo run --bin sculu -- \
-		--log debug \
+		--log info \
 		--perl5lib /Users/kyclark/work/RepeatMasker \
 		--refiner /Users/kyclark/work/RepeatModeler/Refiner \
+		--threads 8 \
 		--rmblast-dir /Users/kyclark/.local/bin \
 		--aligner /Users/kyclark/work/RepeatModeler/util/align.pl \
 		--alignment-matrix $(MATRIX) \
@@ -17,6 +18,7 @@ alu:
 		--outdir ./sculu-alu \
 		--perl5lib /Users/kyclark/work/RepeatMasker \
 		--refiner /Users/kyclark/work/RepeatModeler/Refiner \
+		--threads 8 \
 		--rmblast-dir /Users/kyclark/.local/bin \
 		--aligner /Users/kyclark/work/RepeatModeler/util/align.pl \
 		--alignment-matrix $(MATRIX) \
