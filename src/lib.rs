@@ -141,6 +141,14 @@ struct Winners {
     winning_sets: HashMap<StringPair, u32>,
 }
 
+#[derive(Debug)]
+struct MergeFamilies<'a> {
+    family1: String,
+    family2: String,
+    outdir: PathBuf,
+    instances_100_dir: &'a PathBuf,
+}
+
 // --------------------------------------------------
 pub fn run(mut args: Args) -> Result<()> {
     let start = Instant::now();
@@ -167,7 +175,7 @@ pub fn run(mut args: Args) -> Result<()> {
     // Check that the "consensus" sequences have clear
     // relationships to "instances" files to create "families"
     info!("Checking family names/instances");
-    let family_to_path = check_family_instances(&args, &instances_100)?;
+    let mut family_to_path = check_family_instances(&args, &instances_100)?;
     debug!("family_to_path = {family_to_path:#?}");
 
     // Concatenate the longest 100 into a single file for alignment
@@ -256,8 +264,17 @@ pub fn run(mut args: Args) -> Result<()> {
                 pair.val
             );
 
-            let new_consensus =
-                merge_families(merge_num, &families, &args, &family_to_path)?;
+            let outdir = args.outdir.join(format!("msa-{merge_num:02}"));
+            let new_consensus = merge_families(
+                MergeFamilies {
+                    family1: pair.f1.clone(),
+                    family2: pair.f2.clone(),
+                    outdir,
+                    instances_100_dir: &instances_100_dir,
+                },
+                &mut family_to_path,
+                &args,
+            )?;
 
             writeln!(
                 new_consensi,
@@ -268,6 +285,7 @@ pub fn run(mut args: Args) -> Result<()> {
             for family in families {
                 merged.insert(family);
             }
+
             merge_num += 1;
         }
 
@@ -384,10 +402,10 @@ fn check_family_instances(
     let consensi_names: HashSet<String> =
         consensi_names.keys().cloned().collect();
 
-    let mut family_to_file: HashMap<String, PathBuf> = HashMap::new();
+    let mut family_to_path: HashMap<String, PathBuf> = HashMap::new();
     for instance in instances_100 {
         match instance.file_stem() {
-            Some(stem) => family_to_file
+            Some(stem) => family_to_path
                 .insert(stem.to_string_lossy().to_string(), instance.clone()),
             _ => bail!(
                 "Cannot get filename from {}",
@@ -397,7 +415,7 @@ fn check_family_instances(
     }
 
     let instance_names: HashSet<String> =
-        family_to_file.keys().cloned().collect();
+        family_to_path.keys().cloned().collect();
 
     let missing_instances: HashSet<_> =
         consensi_names.difference(&instance_names).collect();
@@ -424,19 +442,21 @@ fn check_family_instances(
         );
     }
 
-    Ok(family_to_file)
+    Ok(family_to_path)
 }
 
 // --------------------------------------------------
-fn downsample(fasta: &PathBuf, mut output: impl Write) -> Result<()> {
+fn downsample(
+    fasta: &PathBuf,
+    number: &usize,
+    mut output: impl Write,
+) -> Result<()> {
     // Assumes FASTA file contains 100 longest sequences
     let mut reader = parse_reader(open(fasta)?)?;
-
-    // Randomly pick 50 record positions
     let mut rng = thread_rng();
     let range: Vec<usize> = (0..100).collect();
     let mut take: Vec<usize> =
-        range.choose_multiple(&mut rng, 50).cloned().collect();
+        range.choose_multiple(&mut rng, *number).cloned().collect();
     take.sort();
     take.reverse();
 
@@ -747,26 +767,50 @@ fn independence(
 
 // --------------------------------------------------
 fn merge_families(
-    merge_num: usize,
-    families: &Vec<String>,
+    merge_args: MergeFamilies,
+    family_to_path: &mut HashMap<String, PathBuf>,
     args: &Args,
-    family_to_file: &HashMap<String, PathBuf>,
 ) -> Result<String> {
-    let outdir = args.outdir.join(format!("msa-{merge_num:02}"));
-    fs::create_dir_all(&outdir)?;
+    fs::create_dir_all(&merge_args.outdir)?;
 
-    let msa_input = outdir.join("msa-input.fa");
+    let f1 = merge_args.family1;
+    let f2 = merge_args.family2;
+    let num_fams1 = f1.split("::").count() as f64;
+    let num_fams2 = f2.split("::").count() as f64;
+    let num_fams_total = num_fams1 + num_fams2;
+    let num_wanted = 100.;
+    let num_from1 =
+        (num_wanted * (num_fams1 / num_fams_total)).round() as usize;
+    let num_from2 =
+        (num_wanted * (num_fams2 / num_fams_total)).round() as usize;
+    let new_family_name = format!("{f1}::{f2}");
+    let new_family_path = merge_args
+        .instances_100_dir
+        .join(format!("{new_family_name}.fa"));
+
+    info!(
+        "Take {num_from1} from {f1}, {num_from2} from {f2} => {}",
+        new_family_path.display()
+    );
+
     {
         // Block to isolate "output" and force
         // close when passing out of scope
-        let mut output = open_for_write(&msa_input)?;
-        for fam in families {
-            let fasta = family_to_file.get(fam).unwrap_or_else(|| {
+        let mut output = open_for_write(&new_family_path)?;
+        for (fam, num) in &[(f1, num_from1), (f2, num_from2)] {
+            let fasta = family_to_path.get(fam).unwrap_or_else(|| {
                 panic!("Missing instances for family '{fam}'")
             });
-            downsample(fasta, &mut output)?;
+            downsample(fasta, num, &mut output)?;
         }
     }
+
+    // Remember this for the next iteration
+    let _ = &family_to_path.insert(new_family_name, new_family_path.clone());
+
+    // Copy the file to the current merge dir
+    let msa_input = merge_args.outdir.join("msa-input.fa");
+    fs::copy(new_family_path, &msa_input)?;
 
     let mut refiner_args =
         vec!["-threads".to_string(), args.threads.to_string()];
@@ -798,7 +842,7 @@ fn merge_families(
         num.format(",.0", start.elapsed().as_secs() as f64)
     );
 
-    let consensus_path = &outdir.join("msa-input.fa.refiner_cons");
+    let consensus_path = &merge_args.outdir.join("msa-input.fa.refiner_cons");
     if !consensus_path.exists() {
         bail!(
             "Failed to find expected consensus file {}",
