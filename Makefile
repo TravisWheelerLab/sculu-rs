@@ -2,7 +2,8 @@ MATRIX = /Users/kyclark/work/RepeatMasker/Matrices/ncbi/nt/25p41g.matrix
 
 run:
 	cargo run --bin sculu -- \
-		--log info \
+		--log debug \
+		--independence-threshold .8 \
 		--perl5lib /Users/kyclark/work/RepeatMasker \
 		--refiner /Users/kyclark/work/RepeatModeler/Refiner \
 		--threads 8 \
@@ -35,4 +36,4 @@ scores:
 	./scripts/best-score.py ali.scores
 
 clean:
-	rm -rf RM_*
+	rm -rf RM_* makedb.log
