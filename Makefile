@@ -4,6 +4,7 @@ run:
 	cargo run --bin sculu -- \
 		--log debug \
 		--independence-threshold .8 \
+		--confidence-margin 3 \
 		--perl5lib /Users/kyclark/work/RepeatMasker \
 		--refiner /Users/kyclark/work/RepeatModeler/Refiner \
 		--threads 8 \
@@ -15,8 +16,10 @@ run:
 
 alu:
 	cargo run --bin sculu -- \
-		--log info \
+		--log debug \
 		--outdir ./sculu-alu \
+		--independence-threshold .4 \
+		--confidence-margin 3 \
 		--perl5lib /Users/kyclark/work/RepeatMasker \
 		--refiner /Users/kyclark/work/RepeatModeler/Refiner \
 		--threads 8 \

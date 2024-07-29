@@ -1,11 +1,13 @@
 use anyhow::{anyhow, bail, Result};
 use assert_cmd::Command;
+use chrono::Duration;
 use clap::{builder::PossibleValue, Parser, ValueEnum};
 use csv::{ReaderBuilder, WriterBuilder};
 use format_num::NumberFormat;
 use itertools::Itertools;
 use kseq::parse_reader;
 use log::{debug, info};
+use newick::Newick;
 use rand::{seq::SliceRandom, thread_rng};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -44,8 +46,8 @@ pub struct Args {
     pub independence_threshold: f64,
 
     /// Confidence margin
-    #[arg(short, long, value_name = "CONF", default_value = "0.33")]
-    pub confidence_margin: f64,
+    #[arg(short, long, value_name = "CONF", default_value = "3")]
+    pub confidence_margin: usize,
 
     /// Path to RepeatModeler/util/align.pl
     #[arg(long, value_name = "ALIGNER")]
@@ -57,7 +59,7 @@ pub struct Args {
 
     /// Number of threads for rmblastn/Refiner
     #[arg(long, value_name = "THREADS", default_value = "4")]
-    pub threads: usize,
+    pub threads: i64,
 
     /// PERL5LIB, e.g., to find RepeatMasker/RepeatModeler
     #[arg(long, value_name = "PERL5LIB")]
@@ -126,7 +128,7 @@ struct AlignmentScore {
     query: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct Independence {
     f1: String,
     f2: String,
@@ -234,11 +236,10 @@ pub fn run(mut args: Args) -> Result<()> {
         let non_independent =
             independence(winners, args.independence_threshold)?;
 
-        //info!("{} family pair not independent.", non_independent.len());
+        debug!("{} family pair not independent.", non_independent.len());
 
         // Stop the loop when they are all independent
         if non_independent.is_empty() {
-            info!("All pairs are independent.");
             break;
         }
 
@@ -259,13 +260,8 @@ pub fn run(mut args: Args) -> Result<()> {
         let mut merge_num = 1;
         let mut merged: HashSet<String> = HashSet::new();
         for pair in non_independent {
-            // Each pair may be a combo like "Fam1::Fam2"
-            let all_families: Vec<_> = vec![&pair.f1, &pair.f2]
-                .iter()
-                .flat_map(|v| {
-                    v.split("::").map(Into::into).collect::<Vec<_>>()
-                })
-                .collect();
+            // Pairs may be a combo like "(Fam1,Fam2):.2"
+            let all_families: Vec<_> = parse_newick(&[&pair.f1, &pair.f2]);
 
             // We might see Fam1->Fam2 and later Fam2->Fam1
             // Or we might later see Fam1->Fam3
@@ -281,7 +277,7 @@ pub fn run(mut args: Args) -> Result<()> {
                 .map_or("".to_string(), |v| format!("/{v:0.04}"));
 
             info!(
-                "{}: Merge {} => {} ({:0.04}{other_score})",
+                "{}: Merge {} => {} Ind: {:0.04}{other_score}",
                 merge_num, &pair.f1, &pair.f2, pair.val
             );
 
@@ -297,18 +293,26 @@ pub fn run(mut args: Args) -> Result<()> {
                 &args,
             )?;
 
-            let new_family = &all_families.join("::");
-
-            // Update the consensi mapping
-            consensi_seqs.remove(&pair.f1);
-            consensi_seqs.remove(&pair.f2);
-            consensi_seqs.insert(new_family.clone(), new_consensus.clone());
+            let trailing_semi = Regex::new(";$").unwrap();
+            let new_family_newick = format!(
+                "({},{}):{:0.02};",
+                trailing_semi.replace(&pair.f1, ""),
+                trailing_semi.replace(&pair.f2, ""),
+                pair.val
+            );
 
             // Write to output file for next round
             writeln!(
                 new_consensi,
-                ">{merge_num} {new_family}\n{new_consensus}",
+                ">{merge_num} {new_family_newick}\n{new_consensus}",
             )?;
+
+            // Update the consensi mapping
+            let colon_f1 = parse_newick(&[&pair.f1]).join("::");
+            let colon_f2 = parse_newick(&[&pair.f2]).join("::");
+            consensi_seqs.remove(&colon_f1);
+            consensi_seqs.remove(&colon_f2);
+            consensi_seqs.insert(new_family_newick, new_consensus.clone());
 
             // Keep track of all the families that have been merged
             for family in all_families {
@@ -333,8 +337,8 @@ pub fn run(mut args: Args) -> Result<()> {
     }
 
     println!(
-        "Finished in {} seconds, wrote {} final consensi to '{}'",
-        start.elapsed().as_secs(),
+        "Finished in {}. Wrote {} final consensi to '{}'",
+        format_seconds(start.elapsed().as_secs()),
         consensi_seqs.len(),
         final_consensi_path.display(),
     );
@@ -409,6 +413,131 @@ fn bitscore_to_confidence(vals: &[&u32], lambda: f64) -> Result<Vec<f64>> {
     } else {
         bail!("Sum of converted values equals zero")
     }
+}
+
+// --------------------------------------------------
+fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
+    debug!(
+        r#"Calling winners from scores file "{}""#,
+        scores_file.display()
+    );
+
+    let mut reader = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(true)
+        .from_path(scores_file)?;
+    let records = reader.deserialize();
+
+    let mut scores: HashMap<String, HashMap<String, u32>> = HashMap::new();
+
+    for res in records {
+        let rec: AlignmentScore = res?;
+        scores
+            .entry(rec.target)
+            .or_default()
+            .entry(rec.query)
+            .and_modify(|v| *v = cmp::max(rec.score, *v))
+            .or_insert(rec.score);
+    }
+
+    //let alu_y = Regex::new("AluY").unwrap();
+    //let alu_s = Regex::new("AluS").unwrap();
+    let mut clear_winners: HashMap<String, u32> = HashMap::new();
+    let mut winning_sets: HashMap<StringPair, u32> = HashMap::new();
+    for (_target, bit_scores) in scores.iter() {
+        //debug!("\n>>> {target}");
+        let families: Vec<_> = bit_scores.keys().collect();
+
+        //let print = families.iter().any(|f| alu_y.is_match(f))
+        //    || families.iter().any(|f| alu_s.is_match(f));
+
+        let raw_scores: Vec<_> = bit_scores.values().collect();
+        let conf: Vec<_> = bitscore_to_confidence(&raw_scores, args.lambda)?;
+        //if print {
+        //    debug!("families   = {families:?}");
+        //    debug!("raw scores = {raw_scores:?}");
+        //    debug!(
+        //        "confidence = {:?}",
+        //        conf.iter()
+        //            .map(|v| format!("{:0.04}", v))
+        //            .collect::<Vec<_>>()
+        //    );
+        //}
+
+        let pos: Vec<_> = (0..conf.len()).collect();
+        let mut all_comps: Vec<bool> = vec![];
+        for &i in &pos {
+            let val = conf[i];
+            let others: Vec<_> =
+                pos.iter().filter(|&&j| j != i).map(|&j| conf[j]).collect();
+            let pairs: Vec<_> = std::iter::repeat(val)
+                .take(others.len())
+                .zip(others)
+                .collect();
+            let comps: Vec<_> = pairs
+                .iter()
+                .map(|(x, y)| (x * (1. / args.confidence_margin as f64)) > *y)
+                .collect();
+            all_comps.push(comps.iter().all(|&v| v));
+            //if print {
+            //    debug!(
+            //        "{:8} {:0.04} {:5} => {:?}",
+            //        families[i],
+            //        val,
+            //        comps.iter().all(|&v| v),
+            //        comps
+            //    );
+            //}
+        }
+
+        let winners: Vec<String> = families
+            .iter()
+            .zip(all_comps)
+            .filter(|&(_, win)| win)
+            .map(|(fam, _)| fam.to_string())
+            .collect();
+
+        if winners.len() == 1 {
+            let winner = winners.first().unwrap();
+            clear_winners
+                .entry(winner.to_string())
+                .and_modify(|v| *v += 1)
+                .or_insert(1);
+            //debug!("Clear Winner: {winner}");
+        } else {
+            let mut fam_comps: Vec<_> = conf.iter().zip(families).collect();
+            fam_comps.sort_by(|a, b| {
+                b.0.partial_cmp(a.0).unwrap().then_with(|| a.1.cmp(b.1))
+            });
+            let (&top_conf, _) = fam_comps.first().unwrap();
+            let threshold = top_conf * (1. / args.confidence_margin as f64);
+            let winning_set: Vec<_> = fam_comps
+                .iter()
+                .filter_map(|(&conf, fam)| (conf > threshold).then_some(fam))
+                .collect();
+
+            // The permutations will include A/B and B/A
+            // It's important to store the symmetrical keys
+            // Even though this is a duplication of the data
+            for pair in winning_set.into_iter().permutations(2) {
+                if let [&f1, &f2] = pair[..] {
+                    let key = StringPair(f1.to_string(), f2.to_string());
+                    winning_sets
+                        .entry(key)
+                        .and_modify(|v| *v += 1)
+                        .or_insert(1);
+                }
+            }
+        }
+    }
+
+    //debug!("Clear Winners = {clear_winners:#?}");
+    //debug!("Winning Sets = {winning_sets:#?}");
+
+    Ok(Winners {
+        clear_winners,
+        winning_sets,
+    })
 }
 
 // --------------------------------------------------
@@ -566,8 +695,8 @@ fn extract_scores(
                 let query = parts[8].to_string();
                 match consensi_names.get(&query) {
                     Some(query_name) => {
-                        for family in query_name.split("::") {
-                            skip_query.insert(family.to_string());
+                        for family in parse_newick(&[query_name]) {
+                            skip_query.insert(family);
                         }
 
                         wtr.serialize(AlignmentScore {
@@ -593,7 +722,8 @@ fn extract_scores(
         for res in records {
             let rec: AlignmentScore = res?;
             // Move along if any of this sequence's families have been seen
-            if !rec.query.split("::").any(|v| skip_query.contains(v)) {
+            let query_families = parse_newick(&[&rec.query]);
+            if !query_families.into_iter().any(|v| skip_query.contains(&v)) {
                 wtr.serialize(rec)?;
             }
         }
@@ -603,122 +733,50 @@ fn extract_scores(
 }
 
 // --------------------------------------------------
-fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
-    debug!(
-        r#"Calling winners from scores file "{}""#,
-        scores_file.display()
-    );
+fn format_seconds(seconds: u64) -> String {
+    let mut delta = Duration::seconds(seconds as i64);
+    let mut ret = vec![];
+    let days = delta.num_days();
+    if days > 0 {
+        ret.push(format!("{days} day{}", if days == 1 { "" } else { "s" }));
+    }
+    delta -= Duration::seconds(days * 24 * 60 * 60);
 
-    let mut reader = ReaderBuilder::new()
-        .delimiter(b'\t')
-        .has_headers(true)
-        .from_path(scores_file)?;
-    let records = reader.deserialize();
+    let hours = delta.num_hours();
+    if hours > 0 {
+        ret.push(format!(
+            "{hours} hour{}",
+            if hours == 1 { "" } else { "s" }
+        ));
+    }
+    delta -= Duration::seconds(hours * 60 * 60);
 
-    let mut scores: HashMap<String, HashMap<String, u32>> = HashMap::new();
+    let minutes = delta.num_minutes();
+    if minutes > 0 {
+        ret.push(format!(
+            "{minutes} minute{}",
+            if minutes == 1 { "" } else { "s" }
+        ));
+    }
+    delta -= Duration::seconds(minutes * 60);
 
-    for res in records {
-        let rec: AlignmentScore = res?;
-        scores
-            .entry(rec.target)
-            .or_default()
-            .entry(rec.query)
-            .and_modify(|v| *v = cmp::max(rec.score, *v))
-            .or_insert(rec.score);
+    let seconds = delta.num_seconds();
+    if seconds > 0 || ret.is_empty() {
+        ret.push(format!(
+            "{seconds} second{}",
+            if seconds == 1 { "" } else { "s" }
+        ));
     }
 
-    let mut clear_winners: HashMap<String, u32> = HashMap::new();
-    let mut winning_sets: HashMap<StringPair, u32> = HashMap::new();
-    for (_target, bit_scores) in scores.iter() {
-        //debug!("\n>>> {target}");
-        let families: Vec<_> = bit_scores.keys().collect();
-        //debug!("families   = {families:?}");
-        let raw_scores: Vec<_> = bit_scores.values().collect();
-        //debug!("raw scores = {raw_scores:?}");
-        let conf: Vec<_> = bitscore_to_confidence(&raw_scores, args.lambda)?;
-        //debug!(
-        //    "confidence = {:?}",
-        //    conf.iter()
-        //        .map(|v| format!("{:0.04}", v))
-        //        .collect::<Vec<_>>()
-        //);
-
-        let pos: Vec<_> = (0..conf.len()).collect();
-        let mut all_comps: Vec<bool> = vec![];
-        for &i in &pos {
-            let val = conf[i];
-            let others: Vec<_> =
-                pos.iter().filter(|&&j| j != i).map(|&j| conf[j]).collect();
-            let pairs: Vec<_> = std::iter::repeat(val)
-                .take(others.len())
-                .zip(others)
-                .collect();
-            let comps: Vec<_> = pairs
-                .iter()
-                .map(|(x, y)| (x * args.confidence_margin) > { *y })
-                .collect();
-            all_comps.push(comps.iter().all(|&v| v));
-            //debug!(
-            //    "{:8} {:0.04} {:5} => {:?}",
-            //    families[i],
-            //    val,
-            //    comps.iter().all(|&v| v),
-            //    comps
-            //);
-        }
-
-        let winners: Vec<String> = families
-            .iter()
-            .zip(all_comps)
-            .filter(|&(_, win)| win)
-            .map(|(fam, _)| fam.to_string())
-            .collect();
-
-        if winners.len() == 1 {
-            let winner = winners.first().unwrap();
-            clear_winners
-                .entry(winner.to_string())
-                .and_modify(|v| *v += 1)
-                .or_insert(1);
-            //debug!("Clear Winner: {winner}");
-        } else {
-            let mut fam_comps: Vec<_> = conf.iter().zip(families).collect();
-            fam_comps.sort_by(|a, b| {
-                b.0.partial_cmp(a.0).unwrap().then_with(|| a.1.cmp(b.1))
-            });
-            let (&top_conf, _) = fam_comps.first().unwrap();
-            let threshold = top_conf * args.confidence_margin;
-            let winning_set: Vec<_> = fam_comps
-                .iter()
-                .filter_map(|(&conf, fam)| (conf > threshold).then_some(fam))
-                .collect();
-
-            //debug!("Winning Set: {winning_set:?}");
-            for mut pair in winning_set.into_iter().permutations(2) {
-                pair.sort();
-                if let [&f1, &f2] = pair[..] {
-                    let key = StringPair(f1.to_string(), f2.to_string());
-                    winning_sets
-                        .entry(key)
-                        .and_modify(|v| *v += 1)
-                        .or_insert(1);
-                }
-            }
-        }
-    }
-
-    debug!("Clear Winners = {clear_winners:#?}");
-    debug!("Winning Sets = {winning_sets:#?}");
-
-    Ok(Winners {
-        clear_winners,
-        winning_sets,
-    })
+    ret.join(", ")
 }
 
 // --------------------------------------------------
-fn find_min_len(filename: &PathBuf, number: usize) -> Result<usize> {
-    let mut reader = parse_reader(open(filename)?)?;
+/// Find the longest N number of sequences by grouping the sequences
+/// by length and returning the shortest length that includes at least
+/// the desired "number"
+fn find_min_len(file: impl BufRead, number: usize) -> Result<usize> {
+    let mut reader = parse_reader(file)?;
     let mut count_by_len: HashMap<usize, usize> = HashMap::new();
     while let Some(rec) = reader.iter_record()? {
         let len = rec.seq().len();
@@ -732,7 +790,6 @@ fn find_min_len(filename: &PathBuf, number: usize) -> Result<usize> {
     let mut top_n = 0;
     let mut min_len = 0;
     for len in lengths {
-        // Default will be to take all
         min_len = *len;
         top_n += count_by_len.get(len).unwrap_or(&0);
         if top_n >= number {
@@ -743,55 +800,24 @@ fn find_min_len(filename: &PathBuf, number: usize) -> Result<usize> {
     Ok(min_len)
 }
 
-// TODO: Remove
-//// --------------------------------------------------
-//fn get_family_names_from_consensi(
-//    consensi: &PathBuf,
-//    ids: &[&str],
-//) -> Result<Vec<String>> {
-//    let mut reader = parse_reader(open(consensi)?)?;
-//    let mut consensi_names: HashMap<String, String> = HashMap::new();
-//    while let Some(rec) = reader.iter_record()? {
-//        consensi_names.insert(
-//            rec.head().trim().to_string(),
-//            rec.des().trim().to_string(),
-//        );
-//    }
-
-//    Ok(ids
-//        .iter()
-//        .flat_map(|&id| {
-//            consensi_names
-//                .get(id)
-//                .map(|v| v.split("::").map(Into::into).collect::<Vec<_>>())
-//        })
-//        .flatten()
-//        .collect())
-//}
-
 // --------------------------------------------------
 fn independence(
     winners: Winners,
     threshold: f64,
 ) -> Result<Vec<Independence>> {
-    let mut families: HashSet<&str> = HashSet::new();
+    let mut families = HashSet::<&str>::new();
     for StringPair(f1, f2) in winners.winning_sets.keys() {
         families.insert(f1);
         families.insert(f2);
     }
-
     let mut vals = vec![];
+
     for pair in families.into_iter().permutations(2) {
         if let [f1, f2] = pair[..] {
+            let num_wins = *winners.clear_winners.get(f1).unwrap_or(&0);
             let key = StringPair(f1.to_string(), f2.to_string());
             let &num_shared = winners.winning_sets.get(&key).unwrap_or(&0u32);
-            let ind = if num_shared > 0 {
-                let num_wins =
-                    *winners.clear_winners.get(f1).unwrap_or(&0) as f64;
-                num_wins / (num_wins + num_shared as f64)
-            } else {
-                1.
-            };
+            let ind = find_independence(num_wins, num_shared);
 
             if ind < threshold {
                 vals.push(Independence {
@@ -817,6 +843,15 @@ fn independence(
 }
 
 // --------------------------------------------------
+fn find_independence(num_wins: u32, num_shared: u32) -> f64 {
+    if num_shared > 0 {
+        num_wins as f64 / (num_wins as f64 + num_shared as f64)
+    } else {
+        1.
+    }
+}
+
+// --------------------------------------------------
 fn merge_families(
     merge_args: MergeFamilies,
     family_to_path: &mut HashMap<String, PathBuf>,
@@ -824,17 +859,24 @@ fn merge_families(
 ) -> Result<String> {
     fs::create_dir_all(&merge_args.outdir)?;
 
-    let f1 = merge_args.family1;
-    let f2 = merge_args.family2;
-    let num_fams1 = f1.split("::").count() as f64;
-    let num_fams2 = f2.split("::").count() as f64;
+    //let f1 = merge_args.family1;
+    //let f2 = merge_args.family2;
+    //let num_fams1 = f1.split("::").count() as f64;
+    //let num_fams2 = f2.split("::").count() as f64;
+
+    let fams1 = parse_newick(&[&merge_args.family1]);
+    let fams2 = parse_newick(&[&merge_args.family2]);
+    let num_fams1 = fams1.iter().count() as f64;
+    let num_fams2 = fams2.iter().count() as f64;
     let num_fams_total = num_fams1 + num_fams2;
     let num_wanted = 100.;
     let num_from1 =
         (num_wanted * (num_fams1 / num_fams_total)).round() as usize;
     let num_from2 =
         (num_wanted * (num_fams2 / num_fams_total)).round() as usize;
-    let new_family_name = format!("{f1}::{f2}");
+    let f1 = fams1.join("::");
+    let f2 = fams2.join("::");
+    let new_family_name = [&f1, &f2].into_iter().join("::");
     let new_family_path = merge_args
         .instances_100_dir
         .join(format!("{new_family_name}.fa"));
@@ -950,13 +992,39 @@ fn open_for_write(filename: &PathBuf) -> Result<Box<dyn Write>> {
 }
 
 // --------------------------------------------------
+fn parse_newick(vals: &[&str]) -> Vec<String> {
+    let mut ret = vec![];
+    for val in vals {
+        match newick::from_string(val) {
+            // Incoming value is only Newick when merged
+            Ok(trees) => {
+                let mut leaves: Vec<_> = trees
+                    .into_iter()
+                    .flat_map(|tree| {
+                        let leaves = tree.leaves().collect::<Vec<_>>();
+                        leaves.into_iter().flat_map(move |leaf| {
+                            tree.name(leaf).map(|name| name.to_string())
+                        })
+                    })
+                    .collect();
+                ret.append(&mut leaves);
+            }
+            // Otherwise return the original string
+            Err(_) => ret.push(val.to_string()),
+        }
+    }
+
+    ret
+}
+
+// --------------------------------------------------
 fn take_longest_100(args: &Args, outdir: &Path) -> Result<Vec<PathBuf>> {
     // TODO: Make a parameter?
     let limit = 100;
 
     let mut ret = vec![];
     for file in &args.instances {
-        let min_length = find_min_len(file, 100)?;
+        let min_length = find_min_len(open(file)?, 100)?;
         let outfile = outdir.join(file.file_name().unwrap());
         let mut output = open_for_write(&outfile)?;
         let mut reader = parse_reader(open(file)?)?;
@@ -1018,8 +1086,10 @@ fn cat_sequences(inputs: &[PathBuf], outpath: &PathBuf) -> Result<()> {
 mod tests {
     use super::{
         align, bitscore_to_confidence, call_winners, cat_sequences,
-        check_family_instances, downsample, extract_scores, independence,
-        number_consensi, open, Args, StringPair, Winners,
+        check_family_instances, downsample, extract_scores,
+        find_independence, find_min_len, format_seconds, independence,
+        number_consensi, open, parse_newick, Args, Independence, StringPair,
+        Winners,
     };
     use anyhow::Result;
     use kseq::parse_reader;
@@ -1027,6 +1097,7 @@ mod tests {
     use std::{
         collections::HashMap,
         fs::{self, File},
+        io::Cursor,
         path::PathBuf,
     };
     use tempfile::{tempdir, NamedTempFile};
@@ -1048,7 +1119,7 @@ mod tests {
             outdir: outdir.path().into(),
             perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
             lambda: 0.1227,
-            confidence_margin: 0.33,
+            confidence_margin: 3,
             independence_threshold: 0.5,
             aligner: "/Users/kyclark/work/RepeatModeler/util/align.pl"
                 .to_string(),
@@ -1111,7 +1182,7 @@ mod tests {
             outdir: outdir.path().into(),
             perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
             lambda: 0.1227,
-            confidence_margin: 0.33,
+            confidence_margin: 3,
             independence_threshold: 0.5,
             aligner: "/Users/kyclark/work/RepeatModeler/util/align.pl"
                 .to_string(),
@@ -1130,31 +1201,41 @@ mod tests {
         assert!(res.is_ok());
 
         let winners = res.unwrap();
-
-        assert_eq!(
-            winners.clear_winners,
-            HashMap::from([
-                ("AluY".to_string(), 75),
-                ("AluYm1".to_string(), 72),
-                ("AluYb9".to_string(), 93),
-                ("AluYb8".to_string(), 103),
-                ("AluYa5".to_string(), 98)
-            ])
-        );
-
-        let scores = &[
-            (StringPair("AluYa5".to_string(), "AluYb8".to_string()), 6),
-            (StringPair("AluYa5".to_string(), "AluYm1".to_string()), 2),
-            (StringPair("AluY".to_string(), "AluYb8".to_string()), 6),
-            (StringPair("AluY".to_string(), "AluYa5".to_string()), 14),
-            (StringPair("AluY".to_string(), "AluYm1".to_string()), 98),
+        let expected_wins: Vec<(&str, u32)> = vec![
+            ("AluY", 95),
+            ("AluYm1", 72),
+            ("AluYb9", 93),
+            ("AluYb8", 103),
+            ("AluYa5", 98),
         ];
 
-        for (pair, score) in scores {
-            println!("{pair} {score}");
-            let res = winners.winning_sets.get(pair);
+        for (key, val) in expected_wins.iter() {
+            assert_eq!(winners.clear_winners.get(*key), Some(val));
+        }
+
+        // Winning sets should be symmetrical
+        let expected_winning_sets: HashMap<StringPair, u32> =
+            HashMap::from([
+                (StringPair("AluYm1".to_string(), "AluY".to_string()), 28),
+                (StringPair("AluY".to_string(), "AluYm1".to_string()), 28),
+                //
+                (StringPair("AluYb8".to_string(), "AluYa5".to_string()), 3),
+                (StringPair("AluYa5".to_string(), "AluYb8".to_string()), 3),
+                //
+                (StringPair("AluYb8".to_string(), "AluYb9".to_string()), 4),
+                (StringPair("AluYb9".to_string(), "AluYb8".to_string()), 4),
+                //
+                (StringPair("AluY".to_string(), "AluYb8".to_string()), 3),
+                (StringPair("AluYb8".to_string(), "AluY".to_string()), 3),
+                //
+                (StringPair("AluY".to_string(), "AluYa5".to_string()), 7),
+                (StringPair("AluYa5".to_string(), "AluY".to_string()), 7),
+            ]);
+
+        for (pair, score) in expected_winning_sets {
+            let res = winners.winning_sets.get(&pair);
             assert!(res.is_some());
-            assert_eq!(res.unwrap(), score);
+            assert_eq!(res.unwrap(), &score);
         }
 
         Ok(())
@@ -1198,7 +1279,7 @@ mod tests {
             outdir: outdir.path().into(),
             perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
             lambda: 0.1227,
-            confidence_margin: 0.33,
+            confidence_margin: 3,
             independence_threshold: 0.5,
             aligner: "/Users/kyclark/work/RepeatModeler/util/align.pl"
                 .to_string(),
@@ -1275,7 +1356,7 @@ mod tests {
             outdir: outdir.path().into(),
             perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
             lambda: 0.1227,
-            confidence_margin: 0.33,
+            confidence_margin: 3,
             independence_threshold: 0.5,
             aligner: "/Users/kyclark/work/RepeatModeler/util/align.pl"
                 .to_string(),
@@ -1307,6 +1388,29 @@ mod tests {
     }
 
     #[test]
+    fn test_find_independence() -> Result<()> {
+        // No shared wins means fully independent
+        //                       wins  shared
+        let res = find_independence(1, 0);
+        assert_eq!(res, 1.);
+
+        // One clear winner, one shared win == 50%
+        //                       wins  shared
+        let res = find_independence(1, 1);
+        assert_eq!(res, 0.5);
+
+        // No clear winner, only shared wins == 0%
+        //                       wins  shared
+        let res = find_independence(0, 2);
+        assert_eq!(res, 0.);
+
+        //                        wins  shared
+        let res = find_independence(37, 46);
+        assert_eq!(res, 0.4457831325301205);
+        Ok(())
+    }
+
+    #[test]
     fn test_independence() -> Result<()> {
         let clear_winners = HashMap::from([
             ("AluY".to_string(), 37),
@@ -1314,12 +1418,22 @@ mod tests {
             ("AluYb8".to_string(), 50),
         ]);
 
+        // Winning sets are expected to have symmetrical keys
         let winning_sets = HashMap::from([
             (StringPair("AluYa5".to_string(), "AluYb8".to_string()), 6),
+            (StringPair("AluYb8".to_string(), "AluYa5".to_string()), 6),
+            //
             (StringPair("AluYa5".to_string(), "AluYm1".to_string()), 4),
+            (StringPair("AluYm1".to_string(), "AluYa5".to_string()), 4),
+            //
             (StringPair("AluY".to_string(), "AluYb8".to_string()), 6),
+            (StringPair("AluYb8".to_string(), "AluY".to_string()), 6),
+            //
             (StringPair("AluY".to_string(), "AluYa5".to_string()), 12),
+            (StringPair("AluYa5".to_string(), "AluY".to_string()), 12),
+            //
             (StringPair("AluY".to_string(), "AluYm1".to_string()), 46),
+            (StringPair("AluYm1".to_string(), "AluY".to_string()), 46),
         ]);
 
         let res = independence(
@@ -1330,6 +1444,37 @@ mod tests {
             0.5,
         );
         assert!(res.is_ok());
+
+        let ind = res.unwrap();
+        dbg!(&ind);
+        let expected = [
+            Independence {
+                f1: "AluYa5".to_string(),
+                f2: "AluY".to_string(),
+                val: 0.0,
+            },
+            Independence {
+                f1: "AluYa5".to_string(),
+                f2: "AluYb8".to_string(),
+                val: 0.0,
+            },
+            Independence {
+                f1: "AluYa5".to_string(),
+                f2: "AluYm1".to_string(),
+                val: 0.0,
+            },
+            Independence {
+                f1: "AluYm1".to_string(),
+                f2: "AluY".to_string(),
+                val: 0.43902439024390244,
+            },
+            Independence {
+                f1: "AluY".to_string(),
+                f2: "AluYm1".to_string(),
+                val: 0.4457831325301205,
+            },
+        ];
+        assert_eq!(ind, expected);
         Ok(())
     }
 
@@ -1386,6 +1531,26 @@ mod tests {
     }
 
     #[test]
+    fn test_format_seconds() -> Result<()> {
+        assert_eq!(format_seconds(0), "0 seconds");
+        assert_eq!(format_seconds(1), "1 second");
+        assert_eq!(format_seconds(59), "59 seconds");
+        assert_eq!(format_seconds(60), "1 minute");
+        assert_eq!(format_seconds(120), "2 minutes");
+        assert_eq!(format_seconds(121), "2 minutes, 1 second");
+        assert_eq!(format_seconds(60 * 60), "1 hour");
+        assert_eq!(format_seconds((60 * 60) + 1), "1 hour, 1 second");
+        assert_eq!(
+            format_seconds((60 * 60) + 121),
+            "1 hour, 2 minutes, 1 second"
+        );
+        assert_eq!(format_seconds((60 * 60 * 4) + 59), "4 hours, 59 seconds");
+        assert_eq!(format_seconds(60 * 60 * 24), "1 day");
+        assert_eq!(format_seconds((60 * 60 * 24) + 2), "1 day, 2 seconds");
+        Ok(())
+    }
+
+    #[test]
     fn test_number_consensi() -> Result<()> {
         let orig_consensi = PathBuf::from("tests/inputs/consensi.fa");
         let outpath = NamedTempFile::new()?;
@@ -1397,6 +1562,41 @@ mod tests {
             fs::read_to_string("tests/outputs/numbered_consensi.fa")?;
         assert_eq!(actual, expected);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_min_len() -> Result<()> {
+        let fasta = ">1\nAC\n>2\nA\n>3\nACG\n>4\nACGT\n>5\nACGTAA\n>6\nAC\n";
+
+        // Asking for more sequences (10) than present (6) returns the
+        // shortest sequence length (1)
+        let res = find_min_len(Cursor::new(fasta), 10);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 1);
+
+        // Asking for one sequence finds the longest (6bp)
+        let res = find_min_len(Cursor::new(fasta), 1);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 6);
+
+        let res = find_min_len(Cursor::new(fasta), 4);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_newick() -> Result<()> {
+        let res = parse_newick(&["A"]);
+        assert_eq!(res, vec!["A"]);
+
+        let res = parse_newick(&[
+            "(((B,D):0.1,A):0.3,C):0.2;",
+            "((X,Y):0.04,Z):0.25;",
+            "M",
+        ]);
+        assert_eq!(res, vec!["B", "D", "A", "C", "X", "Y", "Z", "M"]);
         Ok(())
     }
 }
