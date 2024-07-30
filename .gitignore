@@ -18,3 +18,4 @@ sculu-out/
 sculu-alu/
 RM_*/
 makedb.log
+tests/inputs/alignment.txt

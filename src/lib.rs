@@ -18,16 +18,18 @@ use std::{
     fs::{self, File},
     io::{BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
+    //sync::{Arc, Mutex},
     time::Instant,
 };
+use which::which;
 
 /// SCULU subfamily clustering tool
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
 pub struct Args {
-    /// FASTA file of subfamily consensus sequences
-    #[arg(long, value_name = "CONSENSUS")]
-    pub consensus: PathBuf,
+    /// FASTA file of subfamily consensi
+    #[arg(long, value_name = "CONSENSI")]
+    pub consensi: PathBuf,
 
     /// Directory of instance files for each subfamily
     #[arg(long, value_name = "INSTANCES", required = true, num_args=1..)]
@@ -47,15 +49,15 @@ pub struct Args {
 
     /// Confidence margin
     #[arg(short, long, value_name = "CONF", default_value = "3")]
-    pub confidence_margin: usize,
+    pub confidence_margin: isize,
 
     /// Path to RepeatModeler/util/align.pl
     #[arg(long, value_name = "ALIGNER")]
-    pub aligner: String,
+    pub aligner: Option<String>,
 
     /// Path to RepeatModeler/Refiner
     #[arg(long, value_name = "REFINER")]
-    pub refiner: String,
+    pub refiner: Option<String>,
 
     /// Number of threads for rmblastn/Refiner
     #[arg(long, value_name = "THREADS", default_value = "4")]
@@ -100,6 +102,9 @@ pub struct Args {
     /// Log level
     #[arg(short, long)]
     pub log: Option<LogLevel>,
+    ///// Log file
+    //#[arg(short, long)]
+    //pub log_file: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +167,25 @@ struct MergeFamilies<'a> {
 // --------------------------------------------------
 pub fn run(mut args: Args) -> Result<()> {
     let start = Instant::now();
+
+    // Optional log file, default to STDOUT
+    //let log_file = match args.log_file {
+    //    Some(filename) => {
+    //        //let log = open_for_write(&PathBuf::from(filename))?;
+    //        let log: Arc<Mutex<Box<dyn Write + Send + Sync>>> = Arc::new(
+    //            Mutex::new(Box::new(BufWriter::new(File::create(filename)?))),
+    //        );
+    //        //let log: Box<dyn Write + Send + Sync> =
+    //        //    Box::new(BufWriter::new(File::create(&filename)?));
+    //        //let log: Arc<Mutex<Box<dyn Write + Send + Sync>>> =
+    //        //    Arc::new(Mutex::new(Box::new(open_for_write(
+    //        //        &PathBuf::from(filename),
+    //        //    )?)));
+    //        env_logger::Target::Pipe(log)
+    //    }
+    //    _ => env_logger::Target::Stdout,
+    //};
+
     env_logger::Builder::new()
         .filter_level(match args.log {
             Some(LogLevel::Debug) => log::LevelFilter::Debug,
@@ -185,10 +209,11 @@ pub fn run(mut args: Args) -> Result<()> {
     let instances_100 = take_longest_100(&args, &instances_100_dir)?;
     debug!("instances_100 = '{instances_100:#?}'");
 
-    // Check that the "consensus" sequences have clear
+    // Check that the "consensi" sequences have clear
     // relationships to "instances" files to create "families"
     debug!("Checking family names/instances");
-    let mut family_to_path = check_family_instances(&args, &instances_100)?;
+    let mut family_to_path =
+        check_family_instances(&args.consensi, &instances_100)?;
     debug!("family_to_path = '{family_to_path:#?}'");
 
     // Concatenate the longest 100 into a single file for alignment
@@ -205,12 +230,9 @@ pub fn run(mut args: Args) -> Result<()> {
     let round0_dir = top_outdir.join(format!("round000"));
     fs::create_dir_all(&round0_dir)?;
     let consensi_path = round0_dir.join("consensi.fa");
-    debug!(
-        "Writing consensus sequences to '{}'",
-        consensi_path.display()
-    );
-    let mut consensi_seqs = number_consensi(&args.consensus, &consensi_path)?;
-    args.consensus = consensi_path;
+    debug!("Writing consensi to '{}'", consensi_path.display());
+    let mut consensi_seqs = number_consensi(&args.consensi, &consensi_path)?;
+    args.consensi = consensi_path;
 
     let mut prev_scores: Option<PathBuf> = None;
     for round in 1.. {
@@ -223,14 +245,19 @@ pub fn run(mut args: Args) -> Result<()> {
         let alignment_file = align(&args, all_seqs_path)?;
 
         // Extract the scores from the alignment file
-        let scores_file =
-            extract_scores(&alignment_file, &prev_scores, &args)?;
+        let scores_file = extract_scores(
+            &alignment_file,
+            &prev_scores,
+            &args.consensi,
+            &args.outdir,
+        )?;
 
         // Save this round's alignment scores for the next
         prev_scores = Some(scores_file.clone());
 
         // Find the winners from the scores
-        let winners = call_winners(&scores_file, &args)?;
+        let winners =
+            call_winners(&scores_file, args.lambda, args.confidence_margin)?;
 
         // Find the pairs with independence below the threshold
         let non_independent =
@@ -282,7 +309,7 @@ pub fn run(mut args: Args) -> Result<()> {
             );
 
             let outdir = args.outdir.join(format!("msa-{merge_num:02}"));
-            let new_consensus = merge_families(
+            let new_consensus_seq = merge_families(
                 MergeFamilies {
                     family1: pair.f1.clone(),
                     family2: pair.f2.clone(),
@@ -304,7 +331,7 @@ pub fn run(mut args: Args) -> Result<()> {
             // Write to output file for next round
             writeln!(
                 new_consensi,
-                ">{merge_num} {new_family_newick}\n{new_consensus}",
+                ">{merge_num} {new_family_newick}\n{new_consensus_seq}",
             )?;
 
             // Update the consensi mapping
@@ -312,7 +339,8 @@ pub fn run(mut args: Args) -> Result<()> {
             let colon_f2 = parse_newick(&[&pair.f2]).join("::");
             consensi_seqs.remove(&colon_f1);
             consensi_seqs.remove(&colon_f2);
-            consensi_seqs.insert(new_family_newick, new_consensus.clone());
+            consensi_seqs
+                .insert(new_family_newick, new_consensus_seq.clone());
 
             // Keep track of all the families that have been merged
             for family in all_families {
@@ -327,7 +355,7 @@ pub fn run(mut args: Args) -> Result<()> {
             "Wrote {merge_num} consensi to '{}'",
             new_consensi_path.display()
         );
-        args.consensus = new_consensi_path;
+        args.consensi = new_consensi_path;
     }
 
     let final_consensi_path = args.outdir.join("final-consensi.fa");
@@ -375,13 +403,17 @@ fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
     align_args.extend_from_slice(&[
         "-alignments".to_string(),
         all_seqs_path.to_string_lossy().to_string(),
-        args.consensus.to_string_lossy().to_string(),
+        args.consensi.to_string_lossy().to_string(),
     ]);
 
     let start = Instant::now();
-    debug!("Running '{} {}'", args.aligner, align_args.join(" "));
+    let aligner = match &args.aligner {
+        Some(path) => PathBuf::from(path.to_string()),
+        _ => which("align.pl")?,
+    };
+    debug!("Running '{} {}'", aligner.display(), align_args.join(" "));
 
-    let mut cmd = Command::new(&args.aligner);
+    let mut cmd = Command::new(&aligner);
     if let Some(perl5lib) = &args.perl5lib {
         cmd.env("PERL5LIB", perl5lib);
     }
@@ -416,7 +448,11 @@ fn bitscore_to_confidence(vals: &[&u32], lambda: f64) -> Result<Vec<f64>> {
 }
 
 // --------------------------------------------------
-fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
+fn call_winners(
+    scores_file: &PathBuf,
+    lambda: f64,
+    confidence_margin: isize,
+) -> Result<Winners> {
     debug!(
         r#"Calling winners from scores file "{}""#,
         scores_file.display()
@@ -440,19 +476,14 @@ fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
             .or_insert(rec.score);
     }
 
-    //let alu_y = Regex::new("AluY").unwrap();
-    //let alu_s = Regex::new("AluS").unwrap();
     let mut clear_winners: HashMap<String, u32> = HashMap::new();
     let mut winning_sets: HashMap<StringPair, u32> = HashMap::new();
     for (_target, bit_scores) in scores.iter() {
         //debug!("\n>>> {target}");
         let families: Vec<_> = bit_scores.keys().collect();
-
-        //let print = families.iter().any(|f| alu_y.is_match(f))
-        //    || families.iter().any(|f| alu_s.is_match(f));
-
         let raw_scores: Vec<_> = bit_scores.values().collect();
-        let conf: Vec<_> = bitscore_to_confidence(&raw_scores, args.lambda)?;
+        let conf: Vec<_> = bitscore_to_confidence(&raw_scores, lambda)?;
+
         //if print {
         //    debug!("families   = {families:?}");
         //    debug!("raw scores = {raw_scores:?}");
@@ -476,7 +507,7 @@ fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
                 .collect();
             let comps: Vec<_> = pairs
                 .iter()
-                .map(|(x, y)| (x * (1. / args.confidence_margin as f64)) > *y)
+                .map(|(x, y)| (x * (1. / confidence_margin as f64)) > *y)
                 .collect();
             all_comps.push(comps.iter().all(|&v| v));
             //if print {
@@ -510,7 +541,7 @@ fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
                 b.0.partial_cmp(a.0).unwrap().then_with(|| a.1.cmp(b.1))
             });
             let (&top_conf, _) = fam_comps.first().unwrap();
-            let threshold = top_conf * (1. / args.confidence_margin as f64);
+            let threshold = top_conf * (1. / confidence_margin as f64);
             let winning_set: Vec<_> = fam_comps
                 .iter()
                 .filter_map(|(&conf, fam)| (conf > threshold).then_some(fam))
@@ -531,9 +562,6 @@ fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
         }
     }
 
-    //debug!("Clear Winners = {clear_winners:#?}");
-    //debug!("Winning Sets = {winning_sets:#?}");
-
     Ok(Winners {
         clear_winners,
         winning_sets,
@@ -541,11 +569,38 @@ fn call_winners(scores_file: &PathBuf, args: &Args) -> Result<Winners> {
 }
 
 // --------------------------------------------------
+fn cat_sequences(inputs: &[PathBuf], outpath: &PathBuf) -> Result<()> {
+    let mut output = open_for_write(outpath)?;
+    for filename in inputs.iter() {
+        let mut reader = parse_reader(open(filename)?)?;
+        let basename = Path::new(filename)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        while let Some(rec) = reader.iter_record()? {
+            // TODO: Remove prefix of basename?
+            writeln!(
+                output,
+                ">{}__{}{}\n{}",
+                basename,
+                rec.head(),
+                rec.des(),
+                rec.seq()
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+// --------------------------------------------------
 fn check_family_instances(
-    args: &Args,
-    instances_100: &Vec<PathBuf>,
+    consensi_file: &PathBuf,
+    instances_100: &[PathBuf],
 ) -> Result<HashMap<String, PathBuf>> {
-    let mut reader = parse_reader(open(&args.consensus)?)?;
+    let mut reader = parse_reader(open(&consensi_file)?)?;
     let mut consensi_names: HashMap<String, u32> = HashMap::new();
     while let Some(rec) = reader.iter_record()? {
         consensi_names
@@ -658,7 +713,8 @@ fn downsample(
 fn extract_scores(
     alignment_file: &PathBuf,
     prev_scores_file: &Option<PathBuf>,
-    args: &Args,
+    consensi: &PathBuf,
+    outdir: &PathBuf,
 ) -> Result<PathBuf> {
     debug!(
         "Extracting scores from alignment '{}' {:?}",
@@ -666,7 +722,7 @@ fn extract_scores(
         prev_scores_file
     );
 
-    let mut reader = parse_reader(open(&args.consensus)?)?;
+    let mut reader = parse_reader(open(&consensi)?)?;
     let mut consensi_names: HashMap<String, String> = HashMap::new();
     while let Some(rec) = reader.iter_record()? {
         consensi_names.insert(
@@ -676,7 +732,7 @@ fn extract_scores(
     }
 
     let file = open(alignment_file)?;
-    let scores_file = args.outdir.join("alignment-scores.tsv");
+    let scores_file = outdir.join("alignment-scores.tsv");
     let mut wtr = WriterBuilder::new()
         .has_headers(true)
         .delimiter(b'\t')
@@ -733,6 +789,44 @@ fn extract_scores(
 }
 
 // --------------------------------------------------
+fn find_independence(num_wins: u32, num_shared: u32) -> f64 {
+    if num_shared > 0 {
+        num_wins as f64 / (num_wins as f64 + num_shared as f64)
+    } else {
+        1.
+    }
+}
+
+// --------------------------------------------------
+/// Find the longest N number of sequences by grouping the sequences
+/// by length and returning the shortest length that includes at least
+/// the desired "number"
+fn find_min_len(file: impl BufRead, number: usize) -> Result<usize> {
+    let mut reader = parse_reader(file)?;
+    let mut count_by_len: HashMap<usize, usize> = HashMap::new();
+    while let Some(rec) = reader.iter_record()? {
+        let len = rec.seq().len();
+        count_by_len.entry(len).and_modify(|i| *i += 1).or_insert(1);
+    }
+
+    let mut lengths: Vec<&usize> = count_by_len.keys().collect();
+    lengths.sort();
+    lengths.reverse();
+
+    let mut top_n = 0;
+    let mut min_len = 0;
+    for len in lengths {
+        min_len = *len;
+        top_n += count_by_len.get(len).unwrap_or(&0);
+        if top_n >= number {
+            break;
+        }
+    }
+
+    Ok(min_len)
+}
+
+// --------------------------------------------------
 fn format_seconds(seconds: u64) -> String {
     let mut delta = Duration::seconds(seconds as i64);
     let mut ret = vec![];
@@ -769,35 +863,6 @@ fn format_seconds(seconds: u64) -> String {
     }
 
     ret.join(", ")
-}
-
-// --------------------------------------------------
-/// Find the longest N number of sequences by grouping the sequences
-/// by length and returning the shortest length that includes at least
-/// the desired "number"
-fn find_min_len(file: impl BufRead, number: usize) -> Result<usize> {
-    let mut reader = parse_reader(file)?;
-    let mut count_by_len: HashMap<usize, usize> = HashMap::new();
-    while let Some(rec) = reader.iter_record()? {
-        let len = rec.seq().len();
-        count_by_len.entry(len).and_modify(|i| *i += 1).or_insert(1);
-    }
-
-    let mut lengths: Vec<&usize> = count_by_len.keys().collect();
-    lengths.sort();
-    lengths.reverse();
-
-    let mut top_n = 0;
-    let mut min_len = 0;
-    for len in lengths {
-        min_len = *len;
-        top_n += count_by_len.get(len).unwrap_or(&0);
-        if top_n >= number {
-            break;
-        }
-    }
-
-    Ok(min_len)
 }
 
 // --------------------------------------------------
@@ -843,26 +908,12 @@ fn independence(
 }
 
 // --------------------------------------------------
-fn find_independence(num_wins: u32, num_shared: u32) -> f64 {
-    if num_shared > 0 {
-        num_wins as f64 / (num_wins as f64 + num_shared as f64)
-    } else {
-        1.
-    }
-}
-
-// --------------------------------------------------
 fn merge_families(
     merge_args: MergeFamilies,
     family_to_path: &mut HashMap<String, PathBuf>,
     args: &Args,
 ) -> Result<String> {
     fs::create_dir_all(&merge_args.outdir)?;
-
-    //let f1 = merge_args.family1;
-    //let f2 = merge_args.family2;
-    //let num_fams1 = f1.split("::").count() as f64;
-    //let num_fams2 = f2.split("::").count() as f64;
 
     let fams1 = parse_newick(&[&merge_args.family1]);
     let fams2 = parse_newick(&[&merge_args.family2]);
@@ -886,8 +937,7 @@ fn merge_families(
         new_family_path.display()
     );
 
-    // Block to isolate "output" and force
-    // close when passing out of scope
+    // Block to isolate "output" and force close when passing out of scope
     {
         let seq_count = 100; // Because we selected 100 longest
         let mut output = open_for_write(&new_family_path)?;
@@ -911,22 +961,34 @@ fn merge_families(
     let msa_input = merge_args.outdir.join("msa-input.fa");
     fs::copy(new_family_path, &msa_input)?;
 
+    let refiner = match &args.refiner {
+        Some(path) => PathBuf::from(path.to_string()),
+        _ => which("Refiner")?,
+    };
+
     let mut refiner_args =
         vec!["-threads".to_string(), args.threads.to_string()];
+
     if let Some(LogLevel::Debug) = args.log {
         refiner_args.push("-debug".to_string())
     }
+
     if let Some(rmblast_dir) = &args.rmblast_dir {
         refiner_args.extend_from_slice(&[
             "--rmblast_dir".to_string(),
             rmblast_dir.to_string(),
         ]);
     }
+
     refiner_args.push(msa_input.to_string_lossy().to_string());
-    debug!(r#"Running "{} {}""#, &args.refiner, &refiner_args.join(" "));
+    debug!(
+        r#"Running "{} {}""#,
+        &refiner.display(),
+        &refiner_args.join(" ")
+    );
 
     let start = Instant::now();
-    let mut cmd = Command::new(&args.refiner);
+    let mut cmd = Command::new(&refiner);
     if let Some(perl5lib) = &args.perl5lib {
         cmd.env("PERL5LIB", perl5lib);
     }
@@ -1055,33 +1117,6 @@ fn take_longest_100(args: &Args, outdir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 // --------------------------------------------------
-fn cat_sequences(inputs: &[PathBuf], outpath: &PathBuf) -> Result<()> {
-    let mut output = open_for_write(outpath)?;
-    for filename in inputs.iter() {
-        let mut reader = parse_reader(open(filename)?)?;
-        let basename = Path::new(filename)
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-
-        while let Some(rec) = reader.iter_record()? {
-            // TODO: Remove prefix of basename?
-            writeln!(
-                output,
-                ">{}__{}{}\n{}",
-                basename,
-                rec.head(),
-                rec.des(),
-                rec.seq()
-            )?;
-        }
-    }
-
-    Ok(())
-}
-
-// --------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1109,9 +1144,8 @@ mod tests {
     #[test]
     fn test_align() -> Result<()> {
         let outdir = tempdir()?;
-
         let args = Args {
-            consensus: PathBuf::from("tests/inputs/consensi.fa".to_string()),
+            consensi: PathBuf::from("tests/inputs/consensi.fa".to_string()),
             instances: vec![PathBuf::from(
                 "tests/inputs/test_set.fa".to_string(),
             )],
@@ -1121,9 +1155,12 @@ mod tests {
             lambda: 0.1227,
             confidence_margin: 3,
             independence_threshold: 0.5,
-            aligner: "/Users/kyclark/work/RepeatModeler/util/align.pl"
-                .to_string(),
-            refiner: "/Users/kyclark/work/RepeatModeler/Refiner".to_string(),
+            aligner: Some(
+                "/Users/kyclark/work/RepeatModeler/util/align.pl".to_string(),
+            ),
+            refiner: Some(
+                "/Users/kyclark/work/RepeatModeler/Refiner".to_string(),
+            ),
             rmblast_dir: Some("/Users/kyclark/.local/bin".to_string()),
             threads: 4,
             align_gap_init: -25,
@@ -1133,6 +1170,7 @@ mod tests {
             align_mask_level: 101,
             align_min_score: 200,
             log: None,
+            //log_file: None,
         };
         let all_seqs_path = PathBuf::from("tests/inputs/all_seqs.fa");
         let res = align(&args, &all_seqs_path);
@@ -1172,32 +1210,9 @@ mod tests {
     #[test]
     fn test_call_winners() -> Result<()> {
         let scores_file = PathBuf::from("tests/outputs/alignment-scores.tsv");
-        let outdir = tempdir()?;
-        let args = Args {
-            consensus: PathBuf::from("tests/inputs/consensi.fa".to_string()),
-            instances: vec![PathBuf::from(
-                "tests/inputs/test_set.fa".to_string(),
-            )],
-            alignment_matrix: Some(MATRIX.to_string()),
-            outdir: outdir.path().into(),
-            perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
-            lambda: 0.1227,
-            confidence_margin: 3,
-            independence_threshold: 0.5,
-            aligner: "/Users/kyclark/work/RepeatModeler/util/align.pl"
-                .to_string(),
-            refiner: "/Users/kyclark/work/RepeatModeler/Refiner".to_string(),
-            rmblast_dir: Some("/Users/kyclark/.local/bin".to_string()),
-            threads: 4,
-            align_gap_init: -25,
-            align_extension: -5,
-            align_min_match: 7,
-            align_bandwidth: 14,
-            align_mask_level: 101,
-            align_min_score: 200,
-            log: None,
-        };
-        let res = call_winners(&scores_file, &args);
+        let lambda = 0.1227;
+        let confidence_margin = 3;
+        let res = call_winners(&scores_file, lambda, confidence_margin);
         assert!(res.is_ok());
 
         let winners = res.unwrap();
@@ -1213,7 +1228,7 @@ mod tests {
             assert_eq!(winners.clear_winners.get(*key), Some(val));
         }
 
-        // Winning sets should be symmetrical
+        // Winning sets should be symmetrical (A/B, B/A)
         let expected_winning_sets: HashMap<StringPair, u32> =
             HashMap::from([
                 (StringPair("AluYm1".to_string(), "AluY".to_string()), 28),
@@ -1243,7 +1258,6 @@ mod tests {
 
     #[test]
     fn test_cat_sequences() -> Result<()> {
-        let outdir = tempdir()?;
         let inputs = vec![
             PathBuf::from("tests/inputs/instances_100/AluY.fa"),
             PathBuf::from("tests/inputs/instances_100/AluYa5.fa"),
@@ -1251,6 +1265,7 @@ mod tests {
             PathBuf::from("tests/inputs/instances_100/AluYb9.fa"),
             PathBuf::from("tests/inputs/instances_100/AluYm1.fa"),
         ];
+        let outdir = tempdir()?;
         let outpath = outdir.path().join("all_seqs.fa");
         let res = cat_sequences(&inputs, &outpath);
         assert!(res.is_ok());
@@ -1269,36 +1284,11 @@ mod tests {
     #[test]
     fn test_check_family_instances() -> Result<()> {
         // The consensi contains duplicated IDs
-        let outdir = tempdir()?;
-        let args1 = Args {
-            consensus: PathBuf::from("tests/inputs/dup_consensi.fa"),
-            instances: vec![PathBuf::from(
-                "tests/inputs/test_set.fa".to_string(),
-            )],
-            alignment_matrix: Some(MATRIX.to_string()),
-            outdir: outdir.path().into(),
-            perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
-            lambda: 0.1227,
-            confidence_margin: 3,
-            independence_threshold: 0.5,
-            aligner: "/Users/kyclark/work/RepeatModeler/util/align.pl"
-                .to_string(),
-            refiner: "/Users/kyclark/work/RepeatModeler/Refiner".to_string(),
-            rmblast_dir: Some("/Users/kyclark/.local/bin".to_string()),
-            threads: 4,
-            align_gap_init: -25,
-            align_extension: -5,
-            align_min_match: 7,
-            align_bandwidth: 14,
-            align_mask_level: 101,
-            align_min_score: 200,
-            log: None,
-        };
-
-        let instances_100 = vec![PathBuf::from(
+        let consensi = PathBuf::from("tests/inputs/dup_consensi.fa");
+        let instances_100 = &[PathBuf::from(
             "tests/inputs/instances_100/AluY.fa".to_string(),
         )];
-        let res = check_family_instances(&args1, &instances_100);
+        let res = check_family_instances(&consensi, instances_100);
         assert!(res.is_err());
         assert_eq!(
             res.unwrap_err().to_string(),
@@ -1306,15 +1296,12 @@ mod tests {
         );
 
         // The consensi has 5 unique IDs but the instances only 2
-        let args2 = Args {
-            consensus: PathBuf::from("tests/inputs/consensi.fa"),
-            ..args1
-        };
-        let instances_100 = vec![
+        let consensi = PathBuf::from("tests/inputs/consensi.fa");
+        let instances_100 = &[
             PathBuf::from("tests/inputs/AluY.fa".to_string()),
             PathBuf::from("tests/inputs/AluYm1.fa".to_string()),
         ];
-        let res = check_family_instances(&args2, &instances_100);
+        let res = check_family_instances(&consensi, instances_100);
         assert!(res.is_err());
         assert_eq!(
             res.unwrap_err().to_string(),
@@ -1322,17 +1309,14 @@ mod tests {
         );
 
         // The consensi has 2 unique IDs but the instances have 4
-        let args3 = Args {
-            consensus: PathBuf::from("tests/inputs/two_consensi.fa"),
-            ..args2
-        };
+        let consensi = PathBuf::from("tests/inputs/two_consensi.fa");
         let instances_100 = vec![
             PathBuf::from("tests/inputs/AluY.fa".to_string()),
             PathBuf::from("tests/inputs/AluYa5.fa".to_string()),
             PathBuf::from("tests/inputs/AluYb9.fa".to_string()),
             PathBuf::from("tests/inputs/AluYm1.fa".to_string()),
         ];
-        let res = check_family_instances(&args3, &instances_100);
+        let res = check_family_instances(&consensi, &instances_100);
         assert!(res.is_err());
         assert_eq!(
             res.unwrap_err().to_string(),
@@ -1343,144 +1327,8 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_scores() -> Result<()> {
-        let outdir = tempdir()?;
-        let args = Args {
-            consensus: PathBuf::from(
-                "tests/inputs/numbered_consensi.fa".to_string(),
-            ),
-            instances: vec![PathBuf::from(
-                "tests/inputs/test_set.fa".to_string(),
-            )],
-            alignment_matrix: Some(MATRIX.to_string()),
-            outdir: outdir.path().into(),
-            perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
-            lambda: 0.1227,
-            confidence_margin: 3,
-            independence_threshold: 0.5,
-            aligner: "/Users/kyclark/work/RepeatModeler/util/align.pl"
-                .to_string(),
-            refiner: "/Users/kyclark/work/RepeatModeler/Refiner".to_string(),
-            rmblast_dir: Some("/Users/kyclark/.local/bin".to_string()),
-            threads: 4,
-            align_gap_init: -25,
-            align_extension: -5,
-            align_min_match: 7,
-            align_bandwidth: 14,
-            align_mask_level: 101,
-            align_min_score: 200,
-            log: None,
-        };
-
-        let alignment_file = PathBuf::from("tests/inputs/alignment.txt");
-        let orig_scores: Option<PathBuf> = None;
-        let res = extract_scores(&alignment_file, &orig_scores, &args);
-        assert!(res.is_ok());
-
-        let scores_file = res.unwrap();
-        assert!(scores_file.exists());
-
-        let actual = fs::read_to_string(scores_file)?;
-        let expected =
-            fs::read_to_string("tests/outputs/alignment-scores.tsv")?;
-        assert_eq!(actual, expected);
-        Ok(())
-    }
-
-    #[test]
-    fn test_find_independence() -> Result<()> {
-        // No shared wins means fully independent
-        //                       wins  shared
-        let res = find_independence(1, 0);
-        assert_eq!(res, 1.);
-
-        // One clear winner, one shared win == 50%
-        //                       wins  shared
-        let res = find_independence(1, 1);
-        assert_eq!(res, 0.5);
-
-        // No clear winner, only shared wins == 0%
-        //                       wins  shared
-        let res = find_independence(0, 2);
-        assert_eq!(res, 0.);
-
-        //                        wins  shared
-        let res = find_independence(37, 46);
-        assert_eq!(res, 0.4457831325301205);
-        Ok(())
-    }
-
-    #[test]
-    fn test_independence() -> Result<()> {
-        let clear_winners = HashMap::from([
-            ("AluY".to_string(), 37),
-            ("AluYm1".to_string(), 36),
-            ("AluYb8".to_string(), 50),
-        ]);
-
-        // Winning sets are expected to have symmetrical keys
-        let winning_sets = HashMap::from([
-            (StringPair("AluYa5".to_string(), "AluYb8".to_string()), 6),
-            (StringPair("AluYb8".to_string(), "AluYa5".to_string()), 6),
-            //
-            (StringPair("AluYa5".to_string(), "AluYm1".to_string()), 4),
-            (StringPair("AluYm1".to_string(), "AluYa5".to_string()), 4),
-            //
-            (StringPair("AluY".to_string(), "AluYb8".to_string()), 6),
-            (StringPair("AluYb8".to_string(), "AluY".to_string()), 6),
-            //
-            (StringPair("AluY".to_string(), "AluYa5".to_string()), 12),
-            (StringPair("AluYa5".to_string(), "AluY".to_string()), 12),
-            //
-            (StringPair("AluY".to_string(), "AluYm1".to_string()), 46),
-            (StringPair("AluYm1".to_string(), "AluY".to_string()), 46),
-        ]);
-
-        let res = independence(
-            Winners {
-                clear_winners,
-                winning_sets,
-            },
-            0.5,
-        );
-        assert!(res.is_ok());
-
-        let ind = res.unwrap();
-        dbg!(&ind);
-        let expected = [
-            Independence {
-                f1: "AluYa5".to_string(),
-                f2: "AluY".to_string(),
-                val: 0.0,
-            },
-            Independence {
-                f1: "AluYa5".to_string(),
-                f2: "AluYb8".to_string(),
-                val: 0.0,
-            },
-            Independence {
-                f1: "AluYa5".to_string(),
-                f2: "AluYm1".to_string(),
-                val: 0.0,
-            },
-            Independence {
-                f1: "AluYm1".to_string(),
-                f2: "AluY".to_string(),
-                val: 0.43902439024390244,
-            },
-            Independence {
-                f1: "AluY".to_string(),
-                f2: "AluYm1".to_string(),
-                val: 0.4457831325301205,
-            },
-        ];
-        assert_eq!(ind, expected);
-        Ok(())
-    }
-
-    #[test]
     fn test_downsample() -> Result<()> {
-        let fasta = PathBuf::from("tests/inputs/AluY.fa");
+        let fasta = PathBuf::from("tests/inputs/AluY_5.fa");
         let tmp_dir = tempdir()?;
         let outpath = tmp_dir.path().join("sub.fa");
 
@@ -1531,37 +1379,50 @@ mod tests {
     }
 
     #[test]
-    fn test_format_seconds() -> Result<()> {
-        assert_eq!(format_seconds(0), "0 seconds");
-        assert_eq!(format_seconds(1), "1 second");
-        assert_eq!(format_seconds(59), "59 seconds");
-        assert_eq!(format_seconds(60), "1 minute");
-        assert_eq!(format_seconds(120), "2 minutes");
-        assert_eq!(format_seconds(121), "2 minutes, 1 second");
-        assert_eq!(format_seconds(60 * 60), "1 hour");
-        assert_eq!(format_seconds((60 * 60) + 1), "1 hour, 1 second");
-        assert_eq!(
-            format_seconds((60 * 60) + 121),
-            "1 hour, 2 minutes, 1 second"
+    fn test_extract_scores() -> Result<()> {
+        let outdir = tempdir()?;
+        let consensi =
+            PathBuf::from("tests/inputs/numbered_consensi.fa".to_string());
+        let alignment_file = PathBuf::from("tests/inputs/alignment.txt");
+        let orig_scores: Option<PathBuf> = None;
+        let res = extract_scores(
+            &alignment_file,
+            &orig_scores,
+            &consensi,
+            &outdir.path().to_path_buf(),
         );
-        assert_eq!(format_seconds((60 * 60 * 4) + 59), "4 hours, 59 seconds");
-        assert_eq!(format_seconds(60 * 60 * 24), "1 day");
-        assert_eq!(format_seconds((60 * 60 * 24) + 2), "1 day, 2 seconds");
+        assert!(res.is_ok());
+
+        let scores_file = res.unwrap();
+        assert!(scores_file.exists());
+
+        let actual = fs::read_to_string(scores_file)?;
+        let expected =
+            fs::read_to_string("tests/outputs/alignment-scores.tsv")?;
+        assert_eq!(actual, expected);
         Ok(())
     }
 
     #[test]
-    fn test_number_consensi() -> Result<()> {
-        let orig_consensi = PathBuf::from("tests/inputs/consensi.fa");
-        let outpath = NamedTempFile::new()?;
-        let res = number_consensi(&orig_consensi, &outpath.path().into());
-        assert!(res.is_ok());
+    fn test_find_independence() -> Result<()> {
+        // No shared wins means fully independent
+        //                       wins  shared
+        let res = find_independence(1, 0);
+        assert_eq!(res, 1.);
 
-        let actual = fs::read_to_string(outpath)?;
-        let expected =
-            fs::read_to_string("tests/outputs/numbered_consensi.fa")?;
-        assert_eq!(actual, expected);
+        // One clear winner, one shared win == 50%
+        //                       wins  shared
+        let res = find_independence(1, 1);
+        assert_eq!(res, 0.5);
 
+        // No clear winner, only shared wins == 0%
+        //                       wins  shared
+        let res = find_independence(0, 2);
+        assert_eq!(res, 0.);
+
+        //                        wins  shared
+        let res = find_independence(37, 46);
+        assert_eq!(res, 0.4457831325301205);
         Ok(())
     }
 
@@ -1583,6 +1444,115 @@ mod tests {
         let res = find_min_len(Cursor::new(fasta), 4);
         assert!(res.is_ok());
         assert_eq!(res.unwrap(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_format_seconds() -> Result<()> {
+        let one_hour = 60 * 60;
+        let one_day = one_hour * 24;
+        assert_eq!(format_seconds(0), "0 seconds");
+        assert_eq!(format_seconds(1), "1 second");
+        assert_eq!(format_seconds(59), "59 seconds");
+        assert_eq!(format_seconds(60), "1 minute");
+        assert_eq!(format_seconds(120), "2 minutes");
+        assert_eq!(format_seconds(121), "2 minutes, 1 second");
+        assert_eq!(format_seconds(one_hour), "1 hour");
+        assert_eq!(format_seconds(one_hour + 1), "1 hour, 1 second");
+        assert_eq!(
+            format_seconds(one_hour + 121),
+            "1 hour, 2 minutes, 1 second"
+        );
+        assert_eq!(
+            format_seconds((one_hour * 4) + 59),
+            "4 hours, 59 seconds"
+        );
+        assert_eq!(format_seconds(one_day), "1 day");
+        assert_eq!(format_seconds(one_day + 2), "1 day, 2 seconds");
+        Ok(())
+    }
+
+    #[test]
+    fn test_independence() -> Result<()> {
+        let clear_winners = HashMap::from([
+            ("AluY".to_string(), 37),
+            ("AluYm1".to_string(), 36),
+            ("AluYb8".to_string(), 50),
+        ]);
+
+        // Winning sets are expected to have symmetrical keys
+        let winning_sets = HashMap::from([
+            (StringPair("AluYa5".to_string(), "AluYb8".to_string()), 6),
+            (StringPair("AluYb8".to_string(), "AluYa5".to_string()), 6),
+            //
+            (StringPair("AluYa5".to_string(), "AluYm1".to_string()), 4),
+            (StringPair("AluYm1".to_string(), "AluYa5".to_string()), 4),
+            //
+            (StringPair("AluY".to_string(), "AluYb8".to_string()), 6),
+            (StringPair("AluYb8".to_string(), "AluY".to_string()), 6),
+            //
+            (StringPair("AluY".to_string(), "AluYa5".to_string()), 12),
+            (StringPair("AluYa5".to_string(), "AluY".to_string()), 12),
+            //
+            (StringPair("AluY".to_string(), "AluYm1".to_string()), 46),
+            (StringPair("AluYm1".to_string(), "AluY".to_string()), 46),
+        ]);
+
+        let res = independence(
+            Winners {
+                clear_winners,
+                winning_sets,
+            },
+            // threshold
+            0.5,
+        );
+        assert!(res.is_ok());
+
+        let ind = res.unwrap();
+        dbg!(&ind);
+        let expected = [
+            Independence {
+                f1: "AluYa5".to_string(),
+                f2: "AluY".to_string(),
+                val: 0.0,
+            },
+            Independence {
+                f1: "AluYa5".to_string(),
+                f2: "AluYb8".to_string(),
+                val: 0.0,
+            },
+            Independence {
+                f1: "AluYa5".to_string(),
+                f2: "AluYm1".to_string(),
+                val: 0.0,
+            },
+            Independence {
+                f1: "AluYm1".to_string(),
+                f2: "AluY".to_string(),
+                val: 0.43902439024390244,
+            },
+            Independence {
+                f1: "AluY".to_string(),
+                f2: "AluYm1".to_string(),
+                val: 0.4457831325301205,
+            },
+        ];
+        assert_eq!(ind, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_number_consensi() -> Result<()> {
+        let orig_consensi = PathBuf::from("tests/inputs/consensi.fa");
+        let outpath = NamedTempFile::new()?;
+        let res = number_consensi(&orig_consensi, &outpath.path().into());
+        assert!(res.is_ok());
+
+        let actual = fs::read_to_string(outpath)?;
+        let expected =
+            fs::read_to_string("tests/outputs/numbered_consensi.fa")?;
+        assert_eq!(actual, expected);
+
         Ok(())
     }
 

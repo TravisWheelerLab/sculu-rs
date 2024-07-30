@@ -1,69 +1,62 @@
 # Rust implementation of SCULU (Subfamily Clustering Using Label Uncertainty)
 
-Original implementation starts with alignment using `cross_match`:
+From Audrey's MS thesis:
 
-```
-cross_match test_set.fa consensi.fa \
--gap_init -25 \
--gap_ext -5 \
--minmatch 7 \
--bandwidth 14 \
--masklevel 101 \
--matrix 25p41g.matrix \
--minscore 200 \
--alignments \
-> test_set.fa.cm
-```
+> Biological sequence annotation is typically performed by aligning a sequence to a database of known sequence elements.
+> For transposable elements, these known sequences represent subfamily consensus sequences.
+> When many of the subfamily models in the database are highly similar to each other, a sequence belonging to one subfamily can easily be mistaken as belonging to another, causing non-reproducible subfamily annotation.
+> Because annotation with subfamilies is expected to give some amount of insight into a sequence’s evolutionary history, it is important that such annotation be reproducible.
+> Here, we present our software tool, SCULU, which builds upon our previously- described methods for computing annotation confidence, and uses those confidence estimates to find and collapse pairs of subfamilies that have a high risk of annotation collision.
+> The result is a reduced set of subfamilies, with increased expected subfamily annotation reliability.
 
-New method will use `rmblastn` (https://www.repeatmasker.org/rmblast/).
+## Setup
 
-NOTE: Transpose the matrices because `cross_match` and NCBI BLAST have different ideas about query/database matrix order.
-
-Download Perl source code:
+Download and install:
 
 * `RepeatModeler`: https://github.com/Dfam-consortium/RepeatModeler
 * `RepeatMasker`: https://www.repeatmasker.org/RepeatMasker/
+* `rmblastn`: https://www.repeatmasker.org/rmblast/
 
-I placed these into parallel directories, e.g., in _$HOME/work_.
-Run `RepeatModeler/util/align.pl` as follows:
+Alignment calls `RepeatModeler/util/align.pl`, and multiple sequence alignment (MSA) calls `RepeatModeler/Refiner`.
+For instance, I placed these into parallel directories, e.g., in _$HOME/work_.
 
-```
-export PERL5LIB=$HOME/work/RepeatMasker 
-perl $HOME/work/RepeatModeler/util/align.pl \
--rmblast \
--gap_init -25 \
--extension -5 \
--minmatch 7 \
--bandwidth 14 \
--masklevel 101 \
--matrix $HOME/work/RepeatMasker/Matrices/ncbi/nt/25p41g.matrix \
--minscore 200 \
--alignments \
-tests/inputs/test_set.fa tests/inputs/consensi.fa > test_set.fa.ali
-```
+## Discussion
 
-Where:
-
-* _test_set.fa_: 50 representative sequences from AluY, AluYb8, and AluYm1 scattered across Hg38
-* _consensi.fa_: 10 consensus sequences for AluY, AluYa5, AluYb8, AluYb9, and AluYm1
-
-**Using Alu from Travis**:
+To run from source, install Rust (https://www.rust-lang.org/tools/install) and use **`cargo run`**.
+Following is the usage detailing the arguments:
 
 ```
-export PERL5LIB=$HOME/work/RepeatMasker 
-perl $HOME/work/RepeatModeler/util/align.pl \
--rmblast \
--gap_init -25 \
--extension -5 \
--minmatch 7 \
--bandwidth 14 \
--masklevel 101 \
--matrix $HOME/work/RepeatMasker/Matrices/ncbi/nt/25p41g.matrix \
--minscore 200 \
--alignments \
-data/alu/subfams/*.fa
-data/alu/alu_consensi.fa
+$ cargo run -- -h
+SCULU subfamily clustering tool
+
+Usage: sculu [OPTIONS] --consensus <CONSENSUS> --instances <INSTANCES>... 
+       --aligner <ALIGNER> --refiner <REFINER>
+
+Options:
+      --consensi <CONSENSI>           FASTA file of subfamily consensi
+      --instances <INSTANCES>...      Directory of instance files for each subfamily
+  -o, --outdir <OUTDIR>               Output directory [default: sculu-out]
+      --lambda <LAMBDA>               Lambda value [default: 0.1227]
+  -i, --independence-threshold <IND>  Independence threshold [default: 0.5]
+  -c, --confidence-margin <CONF>      Confidence margin [default: 3]
+      --aligner <ALIGNER>             Path to RepeatModeler/util/align.pl
+      --refiner <REFINER>             Path to RepeatModeler/Refiner
+      --threads <THREADS>             Number of threads for rmblastn/Refiner [default: 4]
+      --perl5lib <PERL5LIB>           PERL5LIB, e.g., to find RepeatMasker/RepeatModeler
+      --rmblast-dir <RMBLAST_DIR>     Path to rmblastn
+      --alignment-matrix <MATRIX>     Alignment matrix
+      --align-gap-init <GAPINIT>      Alignment gap init [default: -25]
+      --align-extension <EXT>         Alignment extension [default: -5]
+      --align-min-match <MINMATCH>    Alignment minimum match [default: 7]
+      --align-bandwidth <BANDWIDTH>   Alignment bandwidth [default: 14]
+      --align-mask-level <MASKLEVEL>  Alignment mask level [default: 101]
+      --align-min-score <MINSCORE>    Alignment minimum score [default: 200]
+  -l, --log <LOG>                     Log level [possible values: info, debug]
+  -h, --help                          Print help
+  -V, --version                       Print version
 ```
+
+The 
 
 The expectation is that each target (test_set) sequence will map to exactly one consensus sequence.
 
