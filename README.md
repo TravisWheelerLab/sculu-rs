@@ -82,7 +82,7 @@ First, SCULU will do the following setup:
 - Create the `--outdir`, which defaults to _sculu-out_, for all program output.
 - Take the 100 longest sequences from each of the instances and place them into the same filename in the _outdir/instances_100_ directory.
 - Check that the consensi names and instances match and there are no duplicated family names.
-- Concatenate all the 100 longest sequences into the file _outdir/all_seqs.fa_ for use in alignments.
+- Concatenate all 100 longest sequences into the file _outdir/all_seqs.fa_ for use in alignments.
 - Write a new version of the consensi sequences to _outdir/consensi.fa_ where the IDs are replaced with integer values and the ID/family names are moved to the description field. This prevents errors when family names are concatenated into IDs that are too long for `makeblastdb` to handle.
 
 Next, SCULU enters a loop with the following actions:
@@ -90,7 +90,7 @@ Next, SCULU enters a loop with the following actions:
 - Create a _roundXXX_ directory for the current round's output.
 - Run alignment of _all_seqs.fa_ to the consensi to create _roundXXX/alignment.txt_. This file can be large but is retained for record keeping.
 - Extract the scores from the _alignment.txt_ into _roundXXX/alignment-scores.tsv_, a tab-separated file that lists the query, target, and alignment score. 
-- For each target in the scores file, note the highest score for each query (consensi). Then iterate over the targets figure out which consensi are "clear winners" (no contention with other sequences) or are involved in "winning sets" with other sequences, meaning they lack discriminatory power.
+- For each target in the scores file, note the highest score for each query (consensi). Then iterate over the targets to figure out which consensi are "clear winners" (no contention with other sequences) and which are involved in "winning sets" with other sequences, meaning they lack discriminatory power.
 - Use the total number of "clear winners" and "winning sets" to determine the independence of each pair of consensi, sorted from least independent to most with a cutoff of the `--independence-threshold`, e.g., 0.5 means pairs found to be less than 50% independent are marked for merging.
 - If all consensi are determined to be independent, exit the loop.
 - Merge each pair of non-independent consensi. Sample the instance sequences for input to a multiple sequence alignment. The new consenus sequence ID will be a Newick-formatted string noting the two families and their independence value.

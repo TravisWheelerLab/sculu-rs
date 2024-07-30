@@ -46,14 +46,12 @@ fn run1() -> Result<()> {
         "--rmblast-dir",
         &format!("{}/.local/bin", home.to_string_lossy().to_string()),
     ];
-    println!("{}", &args.join(" "));
     run(&args)
 }
 
 // --------------------------------------------------
 fn run(args: &[&str]) -> Result<()> {
     let output = Command::cargo_bin(PRG)?.args(args).output().unwrap();
-    dbg!(&output);
     assert!(output.status.success());
     Ok(())
 }
