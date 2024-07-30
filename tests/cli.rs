@@ -46,6 +46,7 @@ fn run1() -> Result<()> {
         "--rmblast-dir",
         &format!("{}/.local/bin", home.to_string_lossy().to_string()),
     ];
+    println!("{}", &args.join(" "));
     run(&args)
 }
 

@@ -27,10 +27,10 @@ Following is the usage detailing the arguments:
 
 ```
 $ cargo run -- -h
+...
 SCULU subfamily clustering tool
 
-Usage: sculu [OPTIONS] --consensus <CONSENSUS> --instances <INSTANCES>... 
-       --aligner <ALIGNER> --refiner <REFINER>
+Usage: sculu [OPTIONS] --consensi <CONSENSI> --instances <INSTANCES>...
 
 Options:
       --consensi <CONSENSI>           FASTA file of subfamily consensi
@@ -52,182 +52,61 @@ Options:
       --align-mask-level <MASKLEVEL>  Alignment mask level [default: 101]
       --align-min-score <MINSCORE>    Alignment minimum score [default: 200]
   -l, --log <LOG>                     Log level [possible values: info, debug]
+      --log-file <LOG_FILE>           Log file
   -h, --help                          Print help
   -V, --version                       Print version
 ```
 
-The 
-
-The expectation is that each target (test_set) sequence will map to exactly one consensus sequence.
-
-The beginning of the output file _test_set.fa.ali_ shows how to run `rmblastn`:
+The `--consensi` file should be a FASTA file with sequence IDs of the families, e.g.:
 
 ```
-export BLASTMAT=$HOME/work/RepeatMasker/Matrices/ncbi/nt
-rmblastn \
--num_alignments 9999999 \
--db tests/inputs/consensi.fa \
--query tests/inputs/test_set.fa \
--gapopen 20 \
--gapextend 5 \
--mask_level 101 \
--complexity_adjust \
--word_size 7 \
--xdrop_ungap 400 \
--xdrop_gap_final 200 \
--xdrop_gap 100 \
--min_raw_gapped_score 200 \
--dust no \
--outfmt="6 score perc_sub perc_query_gap perc_db_gap qseqid qstart qend qlen sstrand sseqid sstart send slen kdiv cpg_kdiv transi transv cpg_sites qseq sseq" \
--num_threads 4 \
--matrix 25p41g.matrix \
-> test_set.fa.ali
+$ grep -E '^>' tests/inputs/consensi.fa
+>AluYm1
+>AluYb8
+>AluYb9
+>AluYa5
+>AluY
 ```
 
-Each alignment in _test_set.fa.ali_ starts with a left-justified score, here `2170`:
+The `--instances` should each have a name matching the consensi IDs, e.g.:
 
 ```
-2170 6.61 0.30 7.74 AluY__hg38_chr10:116711986-116711654 1 333 (0) AluY 1 310 (1)
-
-  AluY__hg38_ch          1 GGCCGGGCACAGTGGCTCACGCCTGTAATCCCAGCAGTTTGGGAGGCCGA 50
-                                   i i                         v
-  AluY                   1 GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGA 50
-
-  AluY__hg38_ch         51 GGCCAGCGGATCACAAGGTCAGGAGATCGAGACCATCCTGGCTAACACAG 100
-                              vi         i                                 i
-  AluY                  51 GGCGGGCGGATCACGAGGTCAGGAGATCGAGACCATCCTGGCTAACACGG 100
-
-  AluY__hg38_ch        101 TGAAATCCTGTCTCTACTAAAAATAAAAAAATTTAAAAATTTAAAAAAAA 150
-                                i  i                v     -------------------
-  AluY                 101 TGAAACCCCGTCTCTACTAAAAATACAAAAA------------------- 131
-
-  AluY__hg38_ch        151 AAAACATTAGCTGGGCGCGTTGGCAGGCGCCTGTAGTCCCAGCTACTCGG 200
-                           -----      i     i v    i
-  AluY                 132 -----ATTAGCCGGGCGTGGTGGCGGGCGCCTGTAGTCCCAGCTACTCGG 176
-
-  AluY__hg38_ch        201 GAGGCTGAGGCAGGAGAATGTCGTGAACCTGGGAGGTGGAGCTTGCAGTG 250
-                                               v        i      i
-  AluY                 177 GAGGCTGAGGCAGGAGAATGGCGTGAACCCGGGAGGCGGAGCTTGCAGTG 226
-
-  AluY__hg38_ch        251 AGCCGAGATCGCACCACTGCACT-CAGCCTGGGCGACAGAGCGAGACTCA 299
-                                       i          -                         v
-  AluY                 227 AGCCGAGATCGCGCCACTGCACTCCAGCCTGGGCGACAGAGCGAGACTCC 276
-
-  AluY__hg38_ch        300 GTCTCGAAAAAAAAAAAAAAGAAAAAAAAAGAAA 333
-                                i              i         i
-  AluY                 277 GTCTCAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 310
-
-Matrix = 25p41g.matrix
-Kimura (with divCpGMod) = 4.34
-CpG sites = 16, Kimura (unadjusted) = 7.55
-Transitions / transversions = 2.67 (16/6)
-Gap_init rate = 0.08 (25 / 332), avg. gap size = 1.00 (25 / 25)
+$ ls tests/inputs/instances
+AluY.fa   AluYa5.fa AluYb8.fa AluYb9.fa AluYm1.fa
 ```
 
-NOTE: The Python implementation next filters all the alignments for those "with scores that are 10 bits less than the maximum score of the region." Is this necessary?
+## Method
 
-These alignment scores are all we care about right now.
-I can use Python module `csvkit` to look at the results:
+First, SCULU will do the following setup:
 
-```
-$ grep -E '^\d+\s+' test_set.fa.ali | awk 'BEGIN {OFS="\t"} {print $1, $5, $9}' > ali.scores
-$ wc -l ali.scores
-    2108 ali.scores
-$ head ali.scores | csvlook -H
-|     a | b                                    | c      |
-| ----- | ------------------------------------ | ------ |
-| 2,170 | AluY__hg38_chr10:116711986-116711654 | AluY   |
-| 2,147 | AluY__hg38_chr10:116711986-116711654 | AluYm1 |
-| 2,082 | AluY__hg38_chr10:116711986-116711654 | AluYa5 |
-| 2,031 | AluY__hg38_chr10:116711986-116711654 | AluYb8 |
-| 2,008 | AluY__hg38_chr10:116711986-116711654 | AluYb9 |
-|   336 | AluY__hg38_chr10:116711986-116711654 | AluY   |
-|   336 | AluY__hg38_chr10:116711986-116711654 | AluYm1 |
-|   355 | AluY__hg38_chr10:116711986-116711654 | AluYa5 |
-|   311 | AluY__hg38_chr10:116711986-116711654 | AluYb8 |
-|   300 | AluY__hg38_chr10:116711986-116711654 | AluYb9 |
-```
+- Create the `--outdir`, which defaults to _sculu-out_, for all program output.
+- Take the 100 longest sequences from each of the instances and place them into the same filename in the _outdir/instances_100_ directory.
+- Check that the consensi names and instances match and there are no duplicated family names.
+- Concatenate all the 100 longest sequences into the file _outdir/all_seqs.fa_ for use in alignments.
+- Write a new version of the consensi sequences to _outdir/consensi.fa_ where the IDs are replaced with integer values and the ID/family names are moved to the description field. This prevents errors when family names are concatenated into IDs that are too long for `makeblastdb` to handle.
 
-I wrote a Python script to find families that need to be merged:
+Next, SCULU enters a loop with the following actions:
 
-```
-$ ./scripts/best-score.py ali.scores
-...
-Clean Winners
-defaultdict(<class 'int'>, {'AluY': 37, 'AluYb8': 50, 'AluYm1': 36})
+- Create a _roundXXX_ directory for the current round's output.
+- Run alignment of _all_seqs.fa_ to the consensi to create _roundXXX/alignment.txt_. This file can be large but is retained for record keeping.
+- Extract the scores from the _alignment.txt_ into _roundXXX/alignment-scores.tsv_, a tab-separated file that lists the query, target, and alignment score. 
+- For each target in the scores file, note the highest score for each query (consensi). Then iterate over the targets figure out which consensi are "clear winners" (no contention with other sequences) or are involved in "winning sets" with other sequences, meaning they lack discriminatory power.
+- Use the total number of "clear winners" and "winning sets" to determine the independence of each pair of consensi, sorted from least independent to most with a cutoff of the `--independence-threshold`, e.g., 0.5 means pairs found to be less than 50% independent are marked for merging.
+- If all consensi are determined to be independent, exit the loop.
+- Merge each pair of non-independent consensi. Sample the instance sequences for input to a multiple sequence alignment. The new consenus sequence ID will be a Newick-formatted string noting the two families and their independence value.
+- On the next round, use the new consensi file that contains only the newly merged sequences. (There would be no new information from re-aligning the other sequences.) When extracting the alignment scores, include the previous round's score file to add in all the previous targets that weren't included in this new file.
 
-Winning Sets
-defaultdict(<class 'int'>,
-            {('AluY', 'AluYa5'): 12,
-             ('AluY', 'AluYb8'): 6,
-             ('AluY', 'AluYm1'): 46,
-             ('AluYa5', 'AluYb8'): 6,
-             ('AluYa5', 'AluYm1'): 4})
-Independence AluYa5/AluYm1: 0.00
-Independence AluYa5/AluYb8: 0.00
-Independence AluYa5/AluY  : 0.00
-Independence AluYm1/AluY  : 0.44
-Independence AluY  /AluYm1: 0.45
-Independence AluY  /AluYa5: 0.76
-Independence AluY  /AluYb8: 0.86
-Independence AluYb8/AluY  : 0.89
-Independence AluYb8/AluYa5: 0.89
-Independence AluYm1/AluYa5: 0.90
-Independence AluY  /AluYb9: 1.00
-Independence AluYa5/AluYb9: 1.00
-Independence AluYb8/AluYb9: 1.00
-Independence AluYb8/AluYm1: 1.00
-Independence AluYb9/AluY  : 1.00
-Independence AluYb9/AluYa5: 1.00
-Independence AluYb9/AluYb8: 1.00
-Independence AluYb9/AluYm1: 1.00
-Independence AluYm1/AluYb8: 1.00
-Independence AluYm1/AluYb9: 1.00
-Done
-```
+Finally, when the loop exits after all consensi merges, write a new consensi file.
 
-Downsample to keep only the longest 100 instances for each family:
+NOTE: The Python implementation filters all the alignments for those "with scores that are 10 bits less than the maximum score of the region." Is this necessary?
 
-```
-mkdir data/alu/longest_100
-for file in data/alu/subfams/*.fa; do 
-cargo run --bin sculu-downsample -- \
--o data/alu/longest_100/$(basename $file) $file
-done
-```
+## Testing
 
-Randomly sample 50 from each set for the input to the MSA:
-
-```
-mkdir data/alu/random_50
-for file in data/alu/longest_100/*; do 
-seqkit sample -n 50 -o data/alu/random_50/$(basename $file) $file
-done
-```
-
-Create a MSA (multiple sequence alignment)/consensus using the sequences from the least independent pair, e.g., AluYa5/AluYm1:
-
-```
-export PERL5LIB=$HOME/work/RepeatMasker 
-mkdir refiner
-cat data/alu/random_50/{AluYa5,AluYm1}.fa > refiner/tmp.fa
-$HOME/work/RepeatModeler/Refiner -threads 4 \
---rmblast_dir $HOME/.local/bin refiner/tmp.fa
-```
-
-This generates:
-
-```
-$ ls -1 refiner
-tmp.fa
-tmp.fa.njs
-tmp.fa.refiner.stk  # MSA in Stockholm format
-tmp.fa.refiner_cons # Consensus sequence in FASTA format
-```
+- Run **`tar xvf tests/inputs/alignment.tgz`**
+- Run **`cargo test`**
 
 ## Authors
 
-Based on prior work by Audrey Shingleton <audrey.shingleton@umontana.edu>
-
-* Ken Youens-Clark <kyclark@arizona.edu>
-* Travis Wheeler <twheeler@arizona.edu>
+* Audrey Shingleton <audrey.shingleton@umontana.edu> (prior Python implementation for 2022 MS thesis)
+* Ken Youens-Clark <kyclark@arizona.edu> (Rust implementation)
+* Travis Wheeler <twheeler@arizona.edu> (Advisor)

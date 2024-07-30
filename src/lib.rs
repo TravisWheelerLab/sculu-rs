@@ -3,7 +3,6 @@ use assert_cmd::Command;
 use chrono::Duration;
 use clap::{builder::PossibleValue, Parser, ValueEnum};
 use csv::{ReaderBuilder, WriterBuilder};
-use format_num::NumberFormat;
 use itertools::Itertools;
 use kseq::parse_reader;
 use log::{debug, info};
@@ -18,7 +17,6 @@ use std::{
     fs::{self, File},
     io::{BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
-    //sync::{Arc, Mutex},
     time::Instant,
 };
 use which::which;
@@ -102,9 +100,10 @@ pub struct Args {
     /// Log level
     #[arg(short, long)]
     pub log: Option<LogLevel>,
-    ///// Log file
-    //#[arg(short, long)]
-    //pub log_file: Option<String>,
+
+    /// Log file
+    #[arg(long)]
+    pub log_file: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,29 +167,18 @@ struct MergeFamilies<'a> {
 pub fn run(mut args: Args) -> Result<()> {
     let start = Instant::now();
 
-    // Optional log file, default to STDOUT
-    //let log_file = match args.log_file {
-    //    Some(filename) => {
-    //        //let log = open_for_write(&PathBuf::from(filename))?;
-    //        let log: Arc<Mutex<Box<dyn Write + Send + Sync>>> = Arc::new(
-    //            Mutex::new(Box::new(BufWriter::new(File::create(filename)?))),
-    //        );
-    //        //let log: Box<dyn Write + Send + Sync> =
-    //        //    Box::new(BufWriter::new(File::create(&filename)?));
-    //        //let log: Arc<Mutex<Box<dyn Write + Send + Sync>>> =
-    //        //    Arc::new(Mutex::new(Box::new(open_for_write(
-    //        //        &PathBuf::from(filename),
-    //        //    )?)));
-    //        env_logger::Target::Pipe(log)
-    //    }
-    //    _ => env_logger::Target::Stdout,
-    //};
-
     env_logger::Builder::new()
         .filter_level(match args.log {
             Some(LogLevel::Debug) => log::LevelFilter::Debug,
             Some(LogLevel::Info) => log::LevelFilter::Info,
             _ => log::LevelFilter::Off,
+        })
+        .target(match args.log_file {
+            // Optional log file, default to STDOUT
+            Some(ref filename) => env_logger::Target::Pipe(Box::new(
+                BufWriter::new(File::create(filename)?),
+            )),
+            _ => env_logger::Target::Stdout,
         })
         .init();
 
@@ -241,6 +229,7 @@ pub fn run(mut args: Args) -> Result<()> {
         args.outdir = top_outdir.join(format!("round{round:03}"));
         fs::create_dir_all(&args.outdir)?;
 
+        println!("align");
         // Align longest 100 to the consensi
         let alignment_file = align(&args, all_seqs_path)?;
 
@@ -411,6 +400,7 @@ fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
         Some(path) => PathBuf::from(path.to_string()),
         _ => which("align.pl")?,
     };
+
     debug!("Running '{} {}'", aligner.display(), align_args.join(" "));
 
     let mut cmd = Command::new(&aligner);
@@ -422,10 +412,10 @@ fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
     if !res.status.success() {
         bail!(String::from_utf8(res.stderr)?);
     }
-    let num = NumberFormat::new();
+
     info!(
-        "Alignment finished in {} seconds",
-        num.format(",.0", start.elapsed().as_secs() as f64)
+        "Alignment finished in {}",
+        format_seconds(start.elapsed().as_secs())
     );
 
     let alignment_outfile = args.outdir.join("alignment.txt");
@@ -997,10 +987,10 @@ fn merge_families(
         debug!("{}", String::from_utf8(res.stdout)?);
         bail!(String::from_utf8(res.stderr)?);
     }
-    let num = NumberFormat::new();
+
     info!(
-        "Refiner finished in {} seconds",
-        num.format(",.0", start.elapsed().as_secs() as f64)
+        "Refiner finished in {}",
+        format_seconds(start.elapsed().as_secs())
     );
 
     let consensus_path = &merge_args.outdir.join("msa-input.fa.refiner_cons");
@@ -1170,7 +1160,7 @@ mod tests {
             align_mask_level: 101,
             align_min_score: 200,
             log: None,
-            //log_file: None,
+            log_file: None,
         };
         let all_seqs_path = PathBuf::from("tests/inputs/all_seqs.fa");
         let res = align(&args, &all_seqs_path);

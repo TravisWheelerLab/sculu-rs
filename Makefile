@@ -11,6 +11,7 @@ run:
 		--alignment-matrix $(MATRIX) \
         --rmblast-dir /Users/kyclark/.local/bin
 
+#		--log-file log.out \
 #        --perl5lib /Users/kyclark/work/RepeatMasker \
 #        --refiner /Users/kyclark/work/RepeatModeler/Refiner \
 #        --aligner /Users/kyclark/work/RepeatModeler/util/align.pl \
