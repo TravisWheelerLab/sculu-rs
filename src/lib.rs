@@ -143,7 +143,6 @@ struct Independence {
 struct StringPair(String, String);
 
 impl fmt::Display for StringPair {
-    // This trait requires `fmt` with this exact signature.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}/{}", self.0, self.1)
     }
@@ -161,6 +160,11 @@ struct MergeFamilies<'a> {
     family2: String,
     outdir: PathBuf,
     instances_100_dir: &'a PathBuf,
+    threads: i64,
+    refiner: &'a Option<String>,
+    log: &'a Option<LogLevel>,
+    rmblast_dir: &'a Option<String>,
+    perl5lib: &'a Option<String>,
 }
 
 // --------------------------------------------------
@@ -197,8 +201,9 @@ pub fn run(mut args: Args) -> Result<()> {
     let instances_100 = take_longest_100(&args, &instances_100_dir)?;
     debug!("instances_100 = '{instances_100:#?}'");
 
-    // Check that the "consensi" sequences have clear
-    // relationships to "instances" files to create "families"
+    // Check that the "consensi" sequences have clear relationships
+    // to "instances" files. Returns a mutable hashmap from the
+    // family names to their instance files for merges.
     debug!("Checking family names/instances");
     let mut family_to_path =
         check_family_instances(&args.consensi, &instances_100)?;
@@ -212,28 +217,37 @@ pub fn run(mut args: Args) -> Result<()> {
     );
     cat_sequences(&instances_100, all_seqs_path)?;
 
-    // BLAST chokes on long identifiers, so give the consensi
-    // sequences integer IDs and move the names to the desc
+    // Create a starting directory for the merge iterations.
     let top_outdir = args.outdir.clone();
     let round0_dir = top_outdir.join(format!("round000"));
     fs::create_dir_all(&round0_dir)?;
+
+    // As the consensi are merged, the family names are concatenated
+    // into Newick-formatted strings to track the merges.
+    // These can get quite long, causing `makeblastdb` to fail.
+    // Make the sequence IDs simple integers by numbering
+    // and move the family names to the description.
     let consensi_path = round0_dir.join("consensi.fa");
     debug!("Writing consensi to '{}'", consensi_path.display());
     let mut consensi_seqs = number_consensi(&args.consensi, &consensi_path)?;
     args.consensi = consensi_path;
 
+    // Start merging
     let mut prev_scores: Option<PathBuf> = None;
     for round in 1.. {
         info!(">>> Round {round} <<<");
-
         args.outdir = top_outdir.join(format!("round{round:03}"));
         fs::create_dir_all(&args.outdir)?;
 
-        println!("align");
-        // Align longest 100 to the consensi
+        // Align all the sequences to the current consensi.
+        // On the first round, all the original consensi will be included.
+        // On future rounds, only the newly merged consensi will be present.
         let alignment_file = align(&args, all_seqs_path)?;
 
-        // Extract the scores from the alignment file
+        // Extract the scores from the alignment file.
+        // On the first round, there will be no "prev_scores" file.
+        // On the following rounds, the previous round's scores will be
+        // included for those families that were not merged.
         let scores_file = extract_scores(
             &alignment_file,
             &prev_scores,
@@ -244,7 +258,7 @@ pub fn run(mut args: Args) -> Result<()> {
         // Save this round's alignment scores for the next
         prev_scores = Some(scores_file.clone());
 
-        // Find the winners from the scores
+        // Find the clear/ambiguous winners from the scores
         let winners =
             call_winners(&scores_file, args.lambda, args.confidence_margin)?;
 
@@ -254,11 +268,12 @@ pub fn run(mut args: Args) -> Result<()> {
 
         debug!("{} family pair not independent.", non_independent.len());
 
-        // Stop the loop when they are all independent
+        // Stop the loop when all families are independent
         if non_independent.is_empty() {
             break;
         }
 
+        // Create a lookup for the scores
         let mut score_lookup: HashMap<StringPair, f64> = HashMap::new();
         for pair in &non_independent {
             score_lookup.insert(
@@ -267,27 +282,35 @@ pub fn run(mut args: Args) -> Result<()> {
             );
         }
 
-        // Merge the least independent families
-        // The new consensi file will only contain the merged
-        // sequences. When extracting the scores, we'll pass the
-        // original score file that contains the unmerged sequences.
+        // Merge the least independent families.
+        // The new consensi file will only contain the merged families.
         let new_consensi_path = args.outdir.join("new-consensi.fa");
         let mut new_consensi = open_for_write(&new_consensi_path)?;
         let mut merge_num = 1;
-        let mut merged: HashSet<String> = HashSet::new();
+        let mut already_merged: HashSet<String> = HashSet::new();
         for pair in non_independent {
-            // Pairs may be a combo like "(Fam1,Fam2):.2"
-            let all_families: Vec<_> = parse_newick(&[&pair.f1, &pair.f2]);
+            // The family names may be in Newick format
+            let fams1 = parse_newick(&pair.f1);
+            let fams2 = parse_newick(&pair.f2);
 
-            // We might see Fam1->Fam2 and later Fam2->Fam1
-            // Or we might later see Fam1->Fam3
-            // Only merge a family once
-            if all_families.iter().map(|f| merged.contains(f)).any(|v| v) {
+            // All the family names in this merge
+            let mut all_families: Vec<_> = fams1.clone();
+            for f2 in &fams2 {
+                all_families.push(f2.clone());
+            }
+
+            // We might see Fam1->Fam2 and later Fam2->Fam1.
+            // Or we might later see Fam1->Fam3.
+            // Only merge a family once.
+            if all_families.iter().any(|f| already_merged.contains(f)) {
                 debug!("Already merged one of {}", all_families.join(", "));
                 continue;
             }
 
-            // See if the pair has a score from the other direction
+            // See if the pair has a score from the other direction.
+            // The merges should happen in order from least independent
+            // to greater, so this A/B merge "val" will be lower than the
+            // symmetrical B/A score.
             let other_score = score_lookup
                 .get(&StringPair(pair.f2.to_string(), pair.f1.to_string()))
                 .map_or("".to_string(), |v| format!("/{v:0.04}"));
@@ -297,6 +320,7 @@ pub fn run(mut args: Args) -> Result<()> {
                 merge_num, &pair.f1, &pair.f2, pair.val
             );
 
+            // Place all merge artefacts into a directory.
             let outdir = args.outdir.join(format!("msa-{merge_num:02}"));
             let new_consensus_seq = merge_families(
                 MergeFamilies {
@@ -304,9 +328,13 @@ pub fn run(mut args: Args) -> Result<()> {
                     family2: pair.f2.clone(),
                     outdir,
                     instances_100_dir: &instances_100_dir,
+                    threads: args.threads,
+                    refiner: &args.refiner,
+                    log: &args.log,
+                    rmblast_dir: &args.rmblast_dir,
+                    perl5lib: &args.perl5lib,
                 },
                 &mut family_to_path,
-                &args,
             )?;
 
             let trailing_semi = Regex::new(";$").unwrap();
@@ -317,23 +345,21 @@ pub fn run(mut args: Args) -> Result<()> {
                 pair.val
             );
 
-            // Write to output file for next round
+            // Write the merged families to a new consensi file.
             writeln!(
                 new_consensi,
                 ">{merge_num} {new_family_newick}\n{new_consensus_seq}",
             )?;
 
             // Update the consensi mapping
-            let colon_f1 = parse_newick(&[&pair.f1]).join("::");
-            let colon_f2 = parse_newick(&[&pair.f2]).join("::");
-            consensi_seqs.remove(&colon_f1);
-            consensi_seqs.remove(&colon_f2);
+            consensi_seqs.remove(&fams1.join("::"));
+            consensi_seqs.remove(&fams2.join("::"));
             consensi_seqs
                 .insert(new_family_newick, new_consensus_seq.clone());
 
             // Keep track of all the families that have been merged
             for family in all_families {
-                merged.insert(family);
+                already_merged.insert(family);
             }
 
             // Increment the number of merged pairs
@@ -728,20 +754,28 @@ fn extract_scores(
         .delimiter(b'\t')
         .from_path(&scores_file)?;
 
-    // Take only the score lines that start with an integer
+    // This is a hash to remember the family names we handled
+    // in this round. When reading the scores from the previous
+    // round, we need to skip these queries.
+    let mut skip_query: HashSet<String> = HashSet::new();
+
+    // Regexes for parsing
     let starts_with_score = Regex::new(r"^\d+\s").unwrap();
     let spaces = Regex::new(r"\s+").unwrap();
-    let mut skip_query: HashSet<String> = HashSet::new();
+
     for line in file.lines().map_while(Result::ok) {
+        // Take only the score lines that start with an integer
         if starts_with_score.is_match(&line) {
             let parts: Vec<_> = spaces.split(&line).collect();
             if parts.len() == 12 {
                 let score: u32 = parts[0].parse()?;
                 let target = parts[4].to_string();
                 let query = parts[8].to_string();
+
                 match consensi_names.get(&query) {
                     Some(query_name) => {
-                        for family in parse_newick(&[query_name]) {
+                        // Don't process this query again
+                        for family in parse_newick(query_name) {
                             skip_query.insert(family);
                         }
 
@@ -767,8 +801,9 @@ fn extract_scores(
 
         for res in records {
             let rec: AlignmentScore = res?;
+
             // Move along if any of this sequence's families have been seen
-            let query_families = parse_newick(&[&rec.query]);
+            let query_families = parse_newick(&rec.query);
             if !query_families.into_iter().any(|v| skip_query.contains(&v)) {
                 wtr.serialize(rec)?;
             }
@@ -899,28 +934,26 @@ fn independence(
 
 // --------------------------------------------------
 fn merge_families(
-    merge_args: MergeFamilies,
+    args: MergeFamilies,
     family_to_path: &mut HashMap<String, PathBuf>,
-    args: &Args,
 ) -> Result<String> {
-    fs::create_dir_all(&merge_args.outdir)?;
+    fs::create_dir_all(&args.outdir)?;
 
-    let fams1 = parse_newick(&[&merge_args.family1]);
-    let fams2 = parse_newick(&[&merge_args.family2]);
+    let fams1 = parse_newick(&args.family1);
+    let fams2 = parse_newick(&args.family2);
     let num_fams1 = fams1.iter().count() as f64;
     let num_fams2 = fams2.iter().count() as f64;
     let num_fams_total = num_fams1 + num_fams2;
-    let num_wanted = 100.;
-    let num_from1 =
-        (num_wanted * (num_fams1 / num_fams_total)).round() as usize;
-    let num_from2 =
-        (num_wanted * (num_fams2 / num_fams_total)).round() as usize;
+    let num_seqs_total = 100;
+    let num_from1 = (num_seqs_total as f64 * (num_fams1 / num_fams_total))
+        .round() as usize;
+    let num_from2 = (num_seqs_total as f64 * (num_fams2 / num_fams_total))
+        .round() as usize;
     let f1 = fams1.join("::");
     let f2 = fams2.join("::");
-    let new_family_name = [&f1, &f2].into_iter().join("::");
-    let new_family_path = merge_args
-        .instances_100_dir
-        .join(format!("{new_family_name}.fa"));
+    let new_family_name = format!("{f1}::{f2}");
+    let new_family_path =
+        args.instances_100_dir.join(format!("{new_family_name}.fa"));
 
     debug!(
         "Merging {num_from1} from {f1}, {num_from2} from {f2} => {}",
@@ -929,14 +962,14 @@ fn merge_families(
 
     // Block to isolate "output" and force close when passing out of scope
     {
-        let seq_count = 100; // Because we selected 100 longest
         let mut output = open_for_write(&new_family_path)?;
         let mut total_taken = 0;
         for (fam, num) in &[(f1, num_from1), (f2, num_from2)] {
             let fasta = family_to_path.get(fam).unwrap_or_else(|| {
                 panic!("Missing instances for family '{fam}'")
             });
-            total_taken += downsample(fasta, *num, seq_count, &mut output)?;
+            total_taken +=
+                downsample(fasta, *num, num_seqs_total, &mut output)?;
         }
 
         if total_taken == 0 {
@@ -948,7 +981,7 @@ fn merge_families(
     let _ = &family_to_path.insert(new_family_name, new_family_path.clone());
 
     // Copy the file to the current merge dir
-    let msa_input = merge_args.outdir.join("msa-input.fa");
+    let msa_input = args.outdir.join("msa-input.fa");
     fs::copy(new_family_path, &msa_input)?;
 
     let refiner = match &args.refiner {
@@ -993,7 +1026,7 @@ fn merge_families(
         format_seconds(start.elapsed().as_secs())
     );
 
-    let consensus_path = &merge_args.outdir.join("msa-input.fa.refiner_cons");
+    let consensus_path = &args.outdir.join("msa-input.fa.refiner_cons");
     if !consensus_path.exists() {
         bail!(
             "Failed to find expected consensus file {}",
@@ -1044,26 +1077,24 @@ fn open_for_write(filename: &PathBuf) -> Result<Box<dyn Write>> {
 }
 
 // --------------------------------------------------
-fn parse_newick(vals: &[&str]) -> Vec<String> {
+fn parse_newick(val: &str) -> Vec<String> {
     let mut ret = vec![];
-    for val in vals {
-        match newick::from_string(val) {
-            // Incoming value is only Newick when merged
-            Ok(trees) => {
-                let mut leaves: Vec<_> = trees
-                    .into_iter()
-                    .flat_map(|tree| {
-                        let leaves = tree.leaves().collect::<Vec<_>>();
-                        leaves.into_iter().flat_map(move |leaf| {
-                            tree.name(leaf).map(|name| name.to_string())
-                        })
+    match newick::from_string(val) {
+        // Incoming value is only Newick when merged
+        Ok(trees) => {
+            let mut leaves: Vec<_> = trees
+                .into_iter()
+                .flat_map(|tree| {
+                    let leaves = tree.leaves().collect::<Vec<_>>();
+                    leaves.into_iter().flat_map(move |leaf| {
+                        tree.name(leaf).map(|name| name.to_string())
                     })
-                    .collect();
-                ret.append(&mut leaves);
-            }
-            // Otherwise return the original string
-            Err(_) => ret.push(val.to_string()),
+                })
+                .collect();
+            ret.append(&mut leaves);
         }
+        // Otherwise return the original string
+        Err(_) => ret.push(val.to_string()),
     }
 
     ret
@@ -1548,15 +1579,14 @@ mod tests {
 
     #[test]
     fn test_parse_newick() -> Result<()> {
-        let res = parse_newick(&["A"]);
+        let res = parse_newick("A");
         assert_eq!(res, vec!["A"]);
 
-        let res = parse_newick(&[
-            "(((B,D):0.1,A):0.3,C):0.2;",
-            "((X,Y):0.04,Z):0.25;",
-            "M",
-        ]);
-        assert_eq!(res, vec!["B", "D", "A", "C", "X", "Y", "Z", "M"]);
+        let res = parse_newick("(((B,D):0.1,A):0.3,C):0.2;");
+        assert_eq!(res, vec!["B", "D", "A", "C"]);
+
+        let res = parse_newick("((X,Y):0.04,Z):0.25;");
+        assert_eq!(res, vec!["X", "Y", "Z"]);
         Ok(())
     }
 }
