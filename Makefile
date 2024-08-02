@@ -28,7 +28,7 @@ alu:
 		--rmblast-dir /Users/kyclark/.local/bin \
 		--aligner /Users/kyclark/work/RepeatModeler/util/align.pl \
 		--alignment-matrix $(MATRIX) \
-		--consensus data/alu/alu_consensi.fa \
+		--consensi  data/alu/alu_consensi.fa \
 		--instances data/alu/subfams/*.fa
 
 ds:

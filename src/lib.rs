@@ -286,7 +286,7 @@ pub fn run(mut args: Args) -> Result<()> {
         // The new consensi file will only contain the merged families.
         let new_consensi_path = args.outdir.join("new-consensi.fa");
         let mut new_consensi = open_for_write(&new_consensi_path)?;
-        let mut merge_num = 1;
+        let mut merge_num = 0;
         let mut already_merged: HashSet<String> = HashSet::new();
         for pair in non_independent {
             // The family names may be in Newick format
@@ -306,6 +306,9 @@ pub fn run(mut args: Args) -> Result<()> {
                 debug!("Already merged one of {}", all_families.join(", "));
                 continue;
             }
+
+            // Increment the number of merged pairs
+            merge_num += 1;
 
             // See if the pair has a score from the other direction.
             // The merges should happen in order from least independent
@@ -345,15 +348,25 @@ pub fn run(mut args: Args) -> Result<()> {
                 pair.val
             );
 
-            // Write the merged families to a new consensi file.
+            // Write the merged families to the new consensi file
             writeln!(
                 new_consensi,
                 ">{merge_num} {new_family_newick}\n{new_consensus_seq}",
             )?;
 
+            let f1_len = consensi_seqs.get(&pair.f1).map_or(0, |v| v.len());
+            let f2_len = consensi_seqs.get(&pair.f2).map_or(0, |v| v.len());
+            let new_len = new_consensus_seq.len();
+
+            info!(
+                "{} len was {f1_len}, {} len was {f2_len}, \
+                    new consensi len is {new_len}",
+                pair.f1, pair.f2
+            );
+
             // Update the consensi mapping
-            consensi_seqs.remove(&fams1.join("::"));
-            consensi_seqs.remove(&fams2.join("::"));
+            consensi_seqs.remove(&pair.f1);
+            consensi_seqs.remove(&pair.f2);
             consensi_seqs
                 .insert(new_family_newick, new_consensus_seq.clone());
 
@@ -361,9 +374,6 @@ pub fn run(mut args: Args) -> Result<()> {
             for family in all_families {
                 already_merged.insert(family);
             }
-
-            // Increment the number of merged pairs
-            merge_num += 1;
         }
 
         info!(
@@ -393,6 +403,8 @@ pub fn run(mut args: Args) -> Result<()> {
 fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
     // Perform alignment to query
     let mut align_args = vec![
+        // Don't do complexity adjustment
+        "-raw".to_string(),
         "-rmblast".to_string(),
         "-threads".to_string(),
         args.threads.to_string(),
