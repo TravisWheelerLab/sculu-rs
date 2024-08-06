@@ -8,7 +8,7 @@ run:
 		--independence-threshold .8 \
 		--confidence-margin 3 \
 		--threads 8 \
-        --rmblast-dir /Users/kyclark/.local/bin
+        --rmblast-dir /Users/kyclark/.local/bin \
 		--alignment-matrix $(MATRIX) 
 
 #		--log-file log.out \

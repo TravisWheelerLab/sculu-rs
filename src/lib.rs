@@ -297,6 +297,7 @@ pub fn run(mut args: Args) -> Result<()> {
             .collect();
 
         debug!("{} family pair not independent.", non_independent.len());
+        debug!("{non_independent:#?}");
 
         // Stop the loop when all families are independent
         if non_independent.is_empty() {
@@ -1117,7 +1118,6 @@ fn independence(winners: Winners) -> Vec<Independence> {
             .then_with(|| a.f2.cmp(&b.f2))
     });
 
-    debug!("independence {vals:#?}");
     vals
 }
 
