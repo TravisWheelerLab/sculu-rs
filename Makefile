@@ -8,8 +8,8 @@ run:
 		--independence-threshold .8 \
 		--confidence-margin 3 \
 		--threads 8 \
-		--alignment-matrix $(MATRIX) \
         --rmblast-dir /Users/kyclark/.local/bin
+		--alignment-matrix $(MATRIX) 
 
 #		--log-file log.out \
 #        --perl5lib /Users/kyclark/work/RepeatMasker \
@@ -17,28 +17,20 @@ run:
 #        --aligner /Users/kyclark/work/RepeatModeler/util/align.pl \
 
 alu:
-	cargo run --bin sculu -- \
+	cargo run -- \
+		--consensi  data/alu/alu_consensi.fa \
+		--instances data/alu/subfams/*.fa \
 		--log debug \
 		--outdir ./sculu-alu \
-		--independence-threshold .5 \
-		--confidence-margin 3 \
-		--perl5lib /Users/kyclark/work/RepeatMasker \
-		--refiner /Users/kyclark/work/RepeatModeler/Refiner \
 		--threads 8 \
 		--rmblast-dir /Users/kyclark/.local/bin \
-		--aligner /Users/kyclark/work/RepeatModeler/util/align.pl \
-		--alignment-matrix $(MATRIX) \
-		--consensi  data/alu/alu_consensi.fa \
-		--instances data/alu/subfams/*.fa
+		--alignment-matrix $(MATRIX) 
 
-ds:
-	cargo run --bin sculu-downsample -- data/alu/subfams/AluJb.fa
-
-filter:
-	cargo run --bin filter-alignments -- test_set.fa.ali
-
-scores:
-	./scripts/best-score.py ali.scores
+#--independence-threshold .5 \
+#--confidence-margin 3 \
+#--perl5lib /Users/kyclark/work/RepeatMasker \
+#--refiner /Users/kyclark/work/RepeatModeler/Refiner \
+#--aligner /Users/kyclark/work/RepeatModeler/util/align.pl \
 
 clean:
 	rm -rf RM_* makedb.log tests/inputs/consensi.fa.*

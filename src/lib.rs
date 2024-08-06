@@ -13,12 +13,14 @@ use serde::{Deserialize, Serialize};
 use std::{
     cmp,
     collections::{HashMap, HashSet},
+    ffi::OsStr,
     fmt,
     fs::{self, File},
     io::{BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     time::Instant,
 };
+use walkdir::WalkDir;
 use which::which;
 
 /// SCULU subfamily clustering tool
@@ -49,7 +51,7 @@ pub struct Args {
     #[arg(short, long, value_name = "CONF", default_value = "3")]
     pub confidence_margin: isize,
 
-    /// Path to RepeatModeler/util/align.pl
+    /// Path to rmblastn
     #[arg(long, value_name = "ALIGNER")]
     pub aligner: Option<String>,
 
@@ -71,7 +73,7 @@ pub struct Args {
 
     /// Alignment matrix
     #[arg(long, value_name = "MATRIX")]
-    pub alignment_matrix: Option<String>,
+    pub alignment_matrix: Option<PathBuf>,
 
     /// Alignment gap init
     #[arg(long, value_name = "GAPINIT", default_value = "-25")]
@@ -123,6 +125,15 @@ impl ValueEnum for LogLevel {
             LogLevel::Debug => PossibleValue::new("debug"),
         })
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct RmBlastOutput<'a> {
+    score: u32,
+    target: &'a str,
+    query: &'a str,
+    _qseq: Option<&'a str>,
+    _sseq: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -215,7 +226,12 @@ pub fn run(mut args: Args) -> Result<()> {
         "Concatenating all instance sequences into '{}'",
         all_seqs_path.display()
     );
-    cat_sequences(&instances_100, all_seqs_path)?;
+
+    // How do we select the instances? Use all or a subset?
+    //cat_sequences(&instances_100, all_seqs_path)?;
+
+    // Alternative is to use *all* the sequences
+    cat_sequences(&args.instances, all_seqs_path)?;
 
     // Create a starting directory for the merge iterations.
     let top_outdir = args.outdir.clone();
@@ -262,24 +278,29 @@ pub fn run(mut args: Args) -> Result<()> {
         let winners =
             call_winners(&scores_file, args.lambda, args.confidence_margin)?;
 
-        // Find the pairs with independence below the threshold
-        let non_independent =
-            independence(winners, args.independence_threshold)?;
+        // Determine independence of all pairs
+        let pair_independence = independence(winners);
+
+        // Create a lookup for the scores
+        let mut score_lookup: HashMap<StringPair, f64> = HashMap::new();
+        for pair in &pair_independence {
+            score_lookup.insert(
+                StringPair(pair.f1.to_string(), pair.f2.to_string()),
+                pair.val,
+            );
+        }
+
+        // Select only those pair lacking independence
+        let non_independent: Vec<_> = pair_independence
+            .iter()
+            .filter(|v| v.val < args.independence_threshold)
+            .collect();
 
         debug!("{} family pair not independent.", non_independent.len());
 
         // Stop the loop when all families are independent
         if non_independent.is_empty() {
             break;
-        }
-
-        // Create a lookup for the scores
-        let mut score_lookup: HashMap<StringPair, f64> = HashMap::new();
-        for pair in &non_independent {
-            score_lookup.insert(
-                StringPair(pair.f1.to_string(), pair.f2.to_string()),
-                pair.val,
-            );
         }
 
         // Merge the least independent families.
@@ -400,68 +421,71 @@ pub fn run(mut args: Args) -> Result<()> {
 }
 
 // --------------------------------------------------
-fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
-    // Perform alignment to query
-    let mut align_args = vec![
-        // Don't do complexity adjustment
-        "-raw".to_string(),
-        "-rmblast".to_string(),
-        "-threads".to_string(),
-        args.threads.to_string(),
-        "-gap_init".to_string(),
-        args.align_gap_init.to_string(),
-        "-extension".to_string(),
-        args.align_extension.to_string(),
-        "-minmatch".to_string(),
-        args.align_min_match.to_string(),
-        "-bandwidth".to_string(),
-        args.align_bandwidth.to_string(),
-        "-masklevel".to_string(),
-        args.align_mask_level.to_string(),
-        "-minscore".to_string(),
-        args.align_min_score.to_string(),
-    ];
+// TODO: remove
+//fn _align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
+//    // Perform alignment to query
+//    let mut align_args = vec![
+//        // Don't do complexity adjustment
+//        "-raw".to_string(),
+//        "-rmblast".to_string(),
+//        "-threads".to_string(),
+//        args.threads.to_string(),
+//        "-gap_init".to_string(),
+//        args.align_gap_init.to_string(),
+//        "-extension".to_string(),
+//        args.align_extension.to_string(),
+//        "-minmatch".to_string(),
+//        args.align_min_match.to_string(),
+//        "-bandwidth".to_string(),
+//        args.align_bandwidth.to_string(),
+//        "-masklevel".to_string(),
+//        args.align_mask_level.to_string(),
+//        "-minscore".to_string(),
+//        args.align_min_score.to_string(),
+//    ];
 
-    if let Some(matrix) = &args.alignment_matrix {
-        align_args
-            .extend_from_slice(&["-matrix".to_string(), matrix.to_string()]);
-    }
+//    if let Some(matrix) = &args.alignment_matrix {
+//        align_args.extend_from_slice(&[
+//            "-matrix".to_string(),
+//            matrix.to_string_lossy().to_string(),
+//        ]);
+//    }
 
-    align_args.extend_from_slice(&[
-        "-alignments".to_string(),
-        all_seqs_path.to_string_lossy().to_string(),
-        args.consensi.to_string_lossy().to_string(),
-    ]);
+//    align_args.extend_from_slice(&[
+//        "-alignments".to_string(),
+//        all_seqs_path.to_string_lossy().to_string(),
+//        args.consensi.to_string_lossy().to_string(),
+//    ]);
 
-    let start = Instant::now();
-    let aligner = match &args.aligner {
-        Some(path) => PathBuf::from(path.to_string()),
-        _ => which("align.pl")?,
-    };
+//    let start = Instant::now();
+//    let aligner = match &args.aligner {
+//        Some(path) => PathBuf::from(path.to_string()),
+//        _ => which("align.pl")?,
+//    };
 
-    debug!("Running '{} {}'", aligner.display(), align_args.join(" "));
+//    debug!("Running '{} {}'", aligner.display(), align_args.join(" "));
 
-    let mut cmd = Command::new(&aligner);
-    if let Some(perl5lib) = &args.perl5lib {
-        cmd.env("PERL5LIB", perl5lib);
-    }
+//    let mut cmd = Command::new(&aligner);
+//    if let Some(perl5lib) = &args.perl5lib {
+//        cmd.env("PERL5LIB", perl5lib);
+//    }
 
-    let res = cmd.args(align_args).output()?;
-    if !res.status.success() {
-        bail!(String::from_utf8(res.stderr)?);
-    }
+//    let res = cmd.args(align_args).output()?;
+//    if !res.status.success() {
+//        bail!(String::from_utf8(res.stderr)?);
+//    }
 
-    info!(
-        "Alignment finished in {}",
-        format_seconds(start.elapsed().as_secs())
-    );
+//    info!(
+//        "Alignment finished in {}",
+//        format_seconds(start.elapsed().as_secs())
+//    );
 
-    let alignment_outfile = args.outdir.join("alignment.txt");
-    let mut output = open_for_write(&alignment_outfile)?;
-    output.write_all(&res.stdout)?;
+//    let alignment_outfile = args.outdir.join("alignment.txt");
+//    let mut output = open_for_write(&alignment_outfile)?;
+//    output.write_all(&res.stdout)?;
 
-    Ok(alignment_outfile)
-}
+//    Ok(alignment_outfile)
+//}
 
 // --------------------------------------------------
 fn bitscore_to_confidence(vals: &[&u32], lambda: f64) -> Result<Vec<f64>> {
@@ -473,6 +497,135 @@ fn bitscore_to_confidence(vals: &[&u32], lambda: f64) -> Result<Vec<f64>> {
     } else {
         bail!("Sum of converted values equals zero")
     }
+}
+
+// --------------------------------------------------
+fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
+    let blast_suffixes: HashSet<_> = [
+        "ndb", "nhr", "nin", "njs", "nog", "nos", "not", "nsq", "ntf", "nto",
+    ]
+    .iter()
+    .map(|ext| OsStr::new(ext))
+    .collect();
+
+    let blast_db_dir = &args.consensi.parent().expect("blast db dir");
+    let blast_files: Vec<_> = WalkDir::new(blast_db_dir)
+        .max_depth(0)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            // Find files
+            e.file_type().is_file()
+                // With a nonzero size
+                && e.metadata().unwrap().len() > 0
+                // With a BLAST db suffix
+                && blast_suffixes.contains(e.path().extension().unwrap())
+        })
+        .collect();
+
+    // See if we need to make the BLAST db
+    if blast_files.len() < blast_suffixes.len() {
+        info!("Making BLAST db");
+        let mut makeblastdb_cmd = Command::new("makeblastdb");
+        let makeblastdb_args = &[
+            "-out".to_string(),
+            args.consensi.to_string_lossy().to_string(),
+            "-parse_seqids".to_string(),
+            "-dbtype".to_string(),
+            "nucl".to_string(),
+            "-in".to_string(),
+            args.consensi.to_string_lossy().to_string(),
+        ];
+
+        debug!("Running 'makeblastdb {}'", &makeblastdb_args.join(" "));
+        let res = makeblastdb_cmd.args(makeblastdb_args).output()?;
+        if !res.status.success() {
+            bail!(String::from_utf8(res.stderr)?);
+        }
+    }
+
+    let alignment_outfile = args.outdir.join("alignment.txt");
+    let mut rmblastn_args = vec![
+        "-num_alignments".to_string(),
+        "9999999".to_string(),
+        "-mask_level".to_string(),
+        args.align_mask_level.to_string(),
+        "-min_raw_gapped_score".to_string(),
+        args.align_min_score.to_string(),
+        "-num_threads".to_string(),
+        args.threads.to_string(),
+        "-db".to_string(),
+        args.consensi.to_string_lossy().to_string(),
+        "-query".to_string(),
+        all_seqs_path.to_string_lossy().to_string(),
+        "-out".to_string(),
+        alignment_outfile.to_string_lossy().to_string(),
+        "-outfmt".to_string(),
+        "6 score qseqid sseqid qseq sseq".to_string(),
+        // TODO: Verify these options
+        "-gapopen".to_string(),
+        "20".to_string(),
+        "-gapextend".to_string(),
+        "5".to_string(),
+        "-word_size".to_string(),
+        "7".to_string(),
+        "-xdrop_ungap".to_string(),
+        "400".to_string(),
+        "-xdrop_gap_final".to_string(),
+        "200".to_string(),
+        "-xdrop_gap".to_string(),
+        "100".to_string(),
+        "-dust".to_string(),
+        "no".to_string(),
+        // TODO: verify remove
+        //"-complexity_adjust".to_string(),
+    ];
+
+    let rmblastn = match &args.aligner {
+        Some(path) => PathBuf::from(path.to_string()),
+        _ => which("rmblastn")?,
+    };
+    let mut cmd = Command::new(&rmblastn);
+    if let Some(perl5lib) = &args.perl5lib {
+        cmd.env("PERL5LIB", perl5lib);
+    }
+
+    if let Some(matrix) = &args.alignment_matrix {
+        let filename = matrix.file_name().expect(&format!(
+            "Failed to get filename from '{}'",
+            matrix.display()
+        ));
+
+        let dirname = matrix.parent().expect(&format!(
+            "Failed to get dirname from '{}'",
+            matrix.display()
+        ));
+
+        cmd.env("BLASTMAT", dirname);
+        rmblastn_args.extend_from_slice(&[
+            "-matrix".to_string(),
+            filename.to_string_lossy().to_string(),
+        ]);
+    }
+
+    debug!(
+        "Running '{} {}'",
+        rmblastn.display(),
+        rmblastn_args.join(" ")
+    );
+
+    let start = Instant::now();
+    let res = cmd.args(rmblastn_args).output()?;
+    if !res.status.success() {
+        bail!(String::from_utf8(res.stderr)?);
+    }
+
+    info!(
+        "Alignment finished in {}",
+        format_seconds(start.elapsed().as_secs())
+    );
+
+    Ok(alignment_outfile)
 }
 
 // --------------------------------------------------
@@ -759,9 +912,8 @@ fn extract_scores(
         );
     }
 
-    let file = open(alignment_file)?;
     let scores_file = outdir.join("alignment-scores.tsv");
-    let mut wtr = WriterBuilder::new()
+    let mut scores_wtr = WriterBuilder::new()
         .has_headers(true)
         .delimiter(b'\t')
         .from_path(&scores_file)?;
@@ -771,35 +923,66 @@ fn extract_scores(
     // round, we need to skip these queries.
     let mut skip_query: HashSet<String> = HashSet::new();
 
+    //let file = open(alignment_file)?;
     // Regexes for parsing
-    let starts_with_score = Regex::new(r"^\d+\s").unwrap();
-    let spaces = Regex::new(r"\s+").unwrap();
+    //let starts_with_score = Regex::new(r"^\d+\s").unwrap();
+    //let spaces = Regex::new(r"\s+").unwrap();
 
-    for line in file.lines().map_while(Result::ok) {
-        // Take only the score lines that start with an integer
-        if starts_with_score.is_match(&line) {
-            let parts: Vec<_> = spaces.split(&line).collect();
-            if parts.len() == 12 {
-                let score: u32 = parts[0].parse()?;
-                let target = parts[4].to_string();
-                let query = parts[8].to_string();
+    //for line in file.lines().map_while(Result::ok) {
+    //    // Take only the score lines that start with an integer
+    //    if starts_with_score.is_match(&line) {
+    //        let parts: Vec<_> = spaces.split(&line).collect();
+    //        if parts.len() == 12 {
+    //            let score: u32 = parts[0].parse()?;
+    //            let target = parts[4].to_string();
+    //            let query = parts[8].to_string();
 
-                match consensi_names.get(&query) {
-                    Some(query_name) => {
-                        // Don't process this query again
-                        for family in parse_newick(query_name) {
-                            skip_query.insert(family);
-                        }
+    //            match consensi_names.get(&query) {
+    //                Some(query_name) => {
+    //                    // Don't process this query again
+    //                    for family in parse_newick(query_name) {
+    //                        skip_query.insert(family);
+    //                    }
 
-                        wtr.serialize(AlignmentScore {
-                            score,
-                            target,
-                            query: query_name.clone(),
-                        })?
-                    }
-                    _ => eprintln!("Cannot find query '{query}'"),
+    //                    scores_wtr.serialize(AlignmentScore {
+    //                        score,
+    //                        target,
+    //                        query: query_name.clone(),
+    //                        qseq: None,
+    //                        sseq: None,
+    //                    })?
+    //                }
+    //                _ => eprintln!("Cannot find query '{query}'"),
+    //            }
+    //        }
+    //    }
+    //}
+
+    // BLAST output fails to include headers
+    let mut align_reader = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .from_path(alignment_file)?;
+    let records = align_reader.records();
+    for res in records {
+        let res = res?;
+        let rec: RmBlastOutput = res.deserialize(None)?;
+        match consensi_names.get(rec.query) {
+            Some(query_name) => {
+                // Note the families involved in the previous round's
+                // merges in order to skip them when adding the
+                // previous round's scores.
+                for family in parse_newick(query_name) {
+                    skip_query.insert(family);
                 }
+
+                scores_wtr.serialize(AlignmentScore {
+                    score: rec.score,
+                    target: rec.target.to_string(),
+                    query: query_name.clone(),
+                })?
             }
+            _ => eprintln!("Cannot find query '{}'", rec.query),
         }
     }
 
@@ -810,14 +993,13 @@ fn extract_scores(
             .has_headers(true)
             .from_path(prev_scores)?;
         let records = reader.deserialize();
-
         for res in records {
             let rec: AlignmentScore = res?;
 
             // Move along if any of this sequence's families have been seen
             let query_families = parse_newick(&rec.query);
             if !query_families.into_iter().any(|v| skip_query.contains(&v)) {
-                wtr.serialize(rec)?;
+                scores_wtr.serialize(rec)?;
             }
         }
     }
@@ -903,10 +1085,7 @@ fn format_seconds(seconds: u64) -> String {
 }
 
 // --------------------------------------------------
-fn independence(
-    winners: Winners,
-    threshold: f64,
-) -> Result<Vec<Independence>> {
+fn independence(winners: Winners) -> Vec<Independence> {
     let mut families = HashSet::<&str>::new();
     for StringPair(f1, f2) in winners.winning_sets.keys() {
         families.insert(f1);
@@ -921,13 +1100,11 @@ fn independence(
             let &num_shared = winners.winning_sets.get(&key).unwrap_or(&0u32);
             let ind = find_independence(num_wins, num_shared);
 
-            if ind < threshold {
-                vals.push(Independence {
-                    f1: f1.to_string(),
-                    f2: f2.to_string(),
-                    val: ind,
-                });
-            }
+            vals.push(Independence {
+                f1: f1.to_string(),
+                f2: f2.to_string(),
+                val: ind,
+            });
         }
     }
 
@@ -941,7 +1118,7 @@ fn independence(
     });
 
     debug!("independence {vals:#?}");
-    Ok(vals)
+    vals
 }
 
 // --------------------------------------------------
@@ -1182,7 +1359,7 @@ mod tests {
             instances: vec![PathBuf::from(
                 "tests/inputs/test_set.fa".to_string(),
             )],
-            alignment_matrix: Some(MATRIX.to_string()),
+            alignment_matrix: Some(MATRIX.into()),
             outdir: outdir.path().into(),
             perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
             lambda: 0.1227,
@@ -1531,18 +1708,11 @@ mod tests {
             (StringPair("AluYm1".to_string(), "AluY".to_string()), 46),
         ]);
 
-        let res = independence(
-            Winners {
-                clear_winners,
-                winning_sets,
-            },
-            // threshold
-            0.5,
-        );
-        assert!(res.is_ok());
+        let ind = independence(Winners {
+            clear_winners,
+            winning_sets,
+        });
 
-        let ind = res.unwrap();
-        dbg!(&ind);
         let expected = [
             Independence {
                 f1: "AluYa5".to_string(),
@@ -1568,6 +1738,41 @@ mod tests {
                 f1: "AluY".to_string(),
                 f2: "AluYm1".to_string(),
                 val: 0.4457831325301205,
+            },
+            Independence {
+                f1: "AluY".to_string(),
+                f2: "AluYa5".to_string(),
+                val: 0.7551020408163265,
+            },
+            Independence {
+                f1: "AluY".to_string(),
+                f2: "AluYb8".to_string(),
+                val: 0.8604651162790697,
+            },
+            Independence {
+                f1: "AluYb8".to_string(),
+                f2: "AluY".to_string(),
+                val: 0.8928571428571429,
+            },
+            Independence {
+                f1: "AluYb8".to_string(),
+                f2: "AluYa5".to_string(),
+                val: 0.8928571428571429,
+            },
+            Independence {
+                f1: "AluYm1".to_string(),
+                f2: "AluYa5".to_string(),
+                val: 0.9,
+            },
+            Independence {
+                f1: "AluYb8".to_string(),
+                f2: "AluYm1".to_string(),
+                val: 1.0,
+            },
+            Independence {
+                f1: "AluYm1".to_string(),
+                f2: "AluYb8".to_string(),
+                val: 1.0,
             },
         ];
         assert_eq!(ind, expected);
