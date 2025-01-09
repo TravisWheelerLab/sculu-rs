@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use petgraph::{
     graph::UnGraph,
     unionfind::UnionFind,
-    visit::{EdgeRef, IntoEdgeReferences, IntoNodeReferences, NodeCompactIndexable, NodeRef},
+    visit::{
+        EdgeRef, IntoEdgeReferences, IntoNodeReferences, NodeCompactIndexable, NodeRef,
+    },
 };
 
 use crate::RmBlastOutput;
