@@ -23,6 +23,8 @@ use std::{
 use walkdir::WalkDir;
 use which::which;
 
+mod graph;
+
 //#[derive(Parser, Debug)]
 //#[command(arg_required_else_help = true, version, about)]
 //pub struct Cli {
@@ -203,9 +205,9 @@ pub fn run(mut args: Args) -> Result<()> {
         })
         .target(match args.log_file {
             // Optional log file, default to STDOUT
-            Some(ref filename) => env_logger::Target::Pipe(Box::new(
-                BufWriter::new(File::create(filename)?),
-            )),
+            Some(ref filename) => {
+                env_logger::Target::Pipe(Box::new(BufWriter::new(File::create(filename)?)))
+            }
             _ => env_logger::Target::Stdout,
         })
         .init();
@@ -232,8 +234,7 @@ pub fn run(mut args: Args) -> Result<()> {
     // to "instances" files. Returns a mutable hashmap from the
     // family names to their instance files for merges.
     debug!("Checking family names/instances");
-    let mut family_to_path =
-        check_family_instances(&args.consensi, &instances_100)?;
+    let mut family_to_path = check_family_instances(&args.consensi, &instances_100)?;
     debug!("family_to_path = '{family_to_path:#?}'");
 
     // Concatenate the longest 100 into a single file for alignment
@@ -281,19 +282,14 @@ pub fn run(mut args: Args) -> Result<()> {
         // On the first round, there will be no "prev_scores" file.
         // On the following rounds, the previous round's scores will be
         // included for those families that were not merged.
-        let scores_file = extract_scores(
-            &alignment_file,
-            &prev_scores,
-            &args.consensi,
-            &args.outdir,
-        )?;
+        let scores_file =
+            extract_scores(&alignment_file, &prev_scores, &args.consensi, &args.outdir)?;
 
         // Save this round's alignment scores for the next
         prev_scores = Some(scores_file.clone());
 
         // Find the clear/ambiguous winners from the scores
-        let winners =
-            call_winners(&scores_file, args.lambda, args.confidence_margin)?;
+        let winners = call_winners(&scores_file, args.lambda, args.confidence_margin)?;
 
         // Determine independence of all pairs
         let pair_independence = independence(winners);
@@ -405,8 +401,7 @@ pub fn run(mut args: Args) -> Result<()> {
             // Update the consensi mapping
             consensi_seqs.remove(&pair.f1);
             consensi_seqs.remove(&pair.f2);
-            consensi_seqs
-                .insert(new_family_newick, new_consensus_seq.clone());
+            consensi_seqs.insert(new_family_newick, new_consensus_seq.clone());
 
             // Keep track of all the families that have been merged
             for family in all_families {
@@ -591,8 +586,7 @@ fn align_consensi_to_self(args: &Args) -> Result<()> {
 
 // --------------------------------------------------
 fn bitscore_to_confidence(vals: &[&u32], lambda: f64) -> Result<Vec<f64>> {
-    let converted: Vec<_> =
-        vals.iter().map(|&&v| (v as f64 * lambda).exp2()).collect();
+    let converted: Vec<_> = vals.iter().map(|&&v| (v as f64 * lambda).exp2()).collect();
     let total: f64 = converted.iter().sum();
     if total > 0. {
         Ok(converted.into_iter().map(|v| v / total).collect())
@@ -693,13 +687,13 @@ fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
     }
 
     if let Some(matrix) = &args.alignment_matrix {
-        let filename = matrix.file_name().unwrap_or_else(|| {
-            panic!("Failed to get filename from '{}'", matrix.display())
-        });
+        let filename = matrix
+            .file_name()
+            .unwrap_or_else(|| panic!("Failed to get filename from '{}'", matrix.display()));
 
-        let dirname = matrix.parent().unwrap_or_else(|| {
-            panic!("Failed to get dirname from '{}'", matrix.display())
-        });
+        let dirname = matrix
+            .parent()
+            .unwrap_or_else(|| panic!("Failed to get dirname from '{}'", matrix.display()));
 
         cmd.env("BLASTMAT", dirname);
         rmblastn_args.extend_from_slice(&[
@@ -729,11 +723,7 @@ fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
 }
 
 // --------------------------------------------------
-fn call_winners(
-    scores_file: &PathBuf,
-    lambda: f64,
-    confidence_margin: isize,
-) -> Result<Winners> {
+fn call_winners(scores_file: &PathBuf, lambda: f64, confidence_margin: isize) -> Result<Winners> {
     debug!(
         r#"Calling winners from scores file "{}""#,
         scores_file.display()
@@ -780,8 +770,7 @@ fn call_winners(
         let mut all_comps: Vec<bool> = vec![];
         for &i in &pos {
             let val = conf[i];
-            let others: Vec<_> =
-                pos.iter().filter(|&&j| j != i).map(|&j| conf[j]).collect();
+            let others: Vec<_> = pos.iter().filter(|&&j| j != i).map(|&j| conf[j]).collect();
             let pairs: Vec<_> = std::iter::repeat(val)
                 .take(others.len())
                 .zip(others)
@@ -818,9 +807,7 @@ fn call_winners(
             //debug!("Clear Winner: {winner}");
         } else {
             let mut fam_comps: Vec<_> = conf.iter().zip(families).collect();
-            fam_comps.sort_by(|a, b| {
-                b.0.partial_cmp(a.0).unwrap().then_with(|| a.1.cmp(b.1))
-            });
+            fam_comps.sort_by(|a, b| b.0.partial_cmp(a.0).unwrap().then_with(|| a.1.cmp(b.1)));
             let (&top_conf, _) = fam_comps.first().unwrap();
             let threshold = top_conf * (1. / confidence_margin as f64);
             let winning_set: Vec<_> = fam_comps
@@ -834,10 +821,7 @@ fn call_winners(
             for pair in winning_set.into_iter().permutations(2) {
                 if let [&f1, &f2] = pair[..] {
                     let key = StringPair(f1.to_string(), f2.to_string());
-                    winning_sets
-                        .entry(key)
-                        .and_modify(|v| *v += 1)
-                        .or_insert(1);
+                    winning_sets.entry(key).and_modify(|v| *v += 1).or_insert(1);
                 }
             }
         }
@@ -904,14 +888,14 @@ fn check_family_instances(
         );
     }
 
-    let consensi_names: HashSet<String> =
-        consensi_names.keys().cloned().collect();
+    let consensi_names: HashSet<String> = consensi_names.keys().cloned().collect();
 
     let mut family_to_path: HashMap<String, PathBuf> = HashMap::new();
     for instance in instances_100 {
         match instance.file_stem() {
-            Some(stem) => family_to_path
-                .insert(stem.to_string_lossy().to_string(), instance.clone()),
+            Some(stem) => {
+                family_to_path.insert(stem.to_string_lossy().to_string(), instance.clone())
+            }
             _ => bail!(
                 "Cannot get filename from {}",
                 instance.to_string_lossy().to_string()
@@ -919,15 +903,12 @@ fn check_family_instances(
         };
     }
 
-    let instance_names: HashSet<String> =
-        family_to_path.keys().cloned().collect();
+    let instance_names: HashSet<String> = family_to_path.keys().cloned().collect();
 
-    let missing_instances: HashSet<_> =
-        consensi_names.difference(&instance_names).collect();
+    let missing_instances: HashSet<_> = consensi_names.difference(&instance_names).collect();
 
     if !missing_instances.is_empty() {
-        let mut missing_instances: Vec<_> =
-            missing_instances.iter().collect();
+        let mut missing_instances: Vec<_> = missing_instances.iter().collect();
         missing_instances.sort();
         bail!(
             "Missing the following instances: {}",
@@ -935,8 +916,7 @@ fn check_family_instances(
         );
     }
 
-    let missing_consensi: HashSet<_> =
-        instance_names.difference(&consensi_names).collect();
+    let missing_consensi: HashSet<_> = instance_names.difference(&consensi_names).collect();
 
     if !missing_consensi.is_empty() {
         let mut missing_consensi: Vec<_> = missing_consensi.iter().collect();
@@ -1006,10 +986,7 @@ fn extract_scores(
     let mut reader = parse_reader(open(consensi)?)?;
     let mut consensi_names: HashMap<String, String> = HashMap::new();
     while let Some(rec) = reader.iter_record()? {
-        consensi_names.insert(
-            rec.head().trim().to_string(),
-            rec.des().trim().to_string(),
-        );
+        consensi_names.insert(rec.head().trim().to_string(), rec.des().trim().to_string());
     }
 
     let scores_file = outdir.join("alignment-scores.tsv");
@@ -1157,10 +1134,7 @@ fn format_seconds(seconds: u64) -> String {
 
     let hours = delta.num_hours();
     if hours > 0 {
-        ret.push(format!(
-            "{hours} hour{}",
-            if hours == 1 { "" } else { "s" }
-        ));
+        ret.push(format!("{hours} hour{}", if hours == 1 { "" } else { "s" }));
     }
     delta -= Duration::seconds(hours * 60 * 60);
 
@@ -1233,15 +1207,12 @@ fn merge_families(
     let num_fams2 = fams2.len() as f64;
     let num_fams_total = num_fams1 + num_fams2;
     let num_seqs_total = 100;
-    let num_from1 = (num_seqs_total as f64 * (num_fams1 / num_fams_total))
-        .round() as usize;
-    let num_from2 = (num_seqs_total as f64 * (num_fams2 / num_fams_total))
-        .round() as usize;
+    let num_from1 = (num_seqs_total as f64 * (num_fams1 / num_fams_total)).round() as usize;
+    let num_from2 = (num_seqs_total as f64 * (num_fams2 / num_fams_total)).round() as usize;
     let f1 = fams1.join("::");
     let f2 = fams2.join("::");
     let new_family_name = format!("{f1}::{f2}");
-    let new_family_path =
-        args.instances_100_dir.join(format!("{new_family_name}.fa"));
+    let new_family_path = args.instances_100_dir.join(format!("{new_family_name}.fa"));
 
     debug!(
         "Merging {num_from1} from {f1}, {num_from2} from {f2} => {}",
@@ -1253,11 +1224,10 @@ fn merge_families(
         let mut output = open_for_write(&new_family_path)?;
         let mut total_taken = 0;
         for (fam, num) in &[(f1, num_from1), (f2, num_from2)] {
-            let fasta = family_to_path.get(fam).unwrap_or_else(|| {
-                panic!("Missing instances for family '{fam}'")
-            });
-            total_taken +=
-                downsample(fasta, *num, num_seqs_total, &mut output)?;
+            let fasta = family_to_path
+                .get(fam)
+                .unwrap_or_else(|| panic!("Missing instances for family '{fam}'"));
+            total_taken += downsample(fasta, *num, num_seqs_total, &mut output)?;
         }
 
         if total_taken == 0 {
@@ -1277,18 +1247,14 @@ fn merge_families(
         _ => which("Refiner")?,
     };
 
-    let mut refiner_args =
-        vec!["-threads".to_string(), args.num_threads.to_string()];
+    let mut refiner_args = vec!["-threads".to_string(), args.num_threads.to_string()];
 
     if let Some(LogLevel::Debug) = args.log {
         refiner_args.push("-debug".to_string())
     }
 
     if let Some(rmblast_dir) = &args.rmblast_dir {
-        refiner_args.extend_from_slice(&[
-            "--rmblast_dir".to_string(),
-            rmblast_dir.to_string(),
-        ]);
+        refiner_args.extend_from_slice(&["--rmblast_dir".to_string(), rmblast_dir.to_string()]);
     }
 
     refiner_args.push(msa_input.to_string_lossy().to_string());
@@ -1332,10 +1298,7 @@ fn merge_families(
 }
 
 // --------------------------------------------------
-fn number_consensi(
-    consensi: &PathBuf,
-    outpath: &PathBuf,
-) -> Result<HashMap<String, String>> {
+fn number_consensi(consensi: &PathBuf, outpath: &PathBuf) -> Result<HashMap<String, String>> {
     let mut outfile = open_for_write(outpath)?;
     let mut reader = parse_reader(open(consensi)?)?;
     let mut seqs: HashMap<String, String> = HashMap::new();
@@ -1374,9 +1337,9 @@ fn parse_newick(val: &str) -> Vec<String> {
                 .into_iter()
                 .flat_map(|tree| {
                     let leaves = tree.leaves().collect::<Vec<_>>();
-                    leaves.into_iter().flat_map(move |leaf| {
-                        tree.name(leaf).map(|name| name.to_string())
-                    })
+                    leaves
+                        .into_iter()
+                        .flat_map(move |leaf| tree.name(leaf).map(|name| name.to_string()))
                 })
                 .collect();
             ret.append(&mut leaves);
@@ -1409,13 +1372,7 @@ fn take_longest_100(args: &Args, outdir: &Path) -> Result<Vec<PathBuf>> {
             let seq_len = rec.seq().len();
             if min_length > 0 && seq_len >= min_length {
                 taken += 1;
-                writeln!(
-                    output,
-                    ">{}{}\n{}",
-                    rec.head(),
-                    rec.des(),
-                    rec.seq()
-                )?;
+                writeln!(output, ">{}{}\n{}", rec.head(), rec.des(), rec.seq())?;
             }
         }
 
@@ -1429,11 +1386,9 @@ fn take_longest_100(args: &Args, outdir: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        align, bitscore_to_confidence, call_winners, cat_sequences,
-        check_family_instances, downsample, extract_scores,
-        find_independence, find_min_len, format_seconds, independence,
-        number_consensi, open, parse_newick, Args, Independence, StringPair,
-        Winners,
+        align, bitscore_to_confidence, call_winners, cat_sequences, check_family_instances,
+        downsample, extract_scores, find_independence, find_min_len, format_seconds, independence,
+        number_consensi, open, parse_newick, Args, Independence, StringPair, Winners,
     };
     use anyhow::Result;
     use kseq::parse_reader;
@@ -1447,29 +1402,22 @@ mod tests {
     use tempfile::{tempdir, NamedTempFile};
 
     // Or "tests/inputs/25p41g.matrix"?
-    const MATRIX: &str =
-        "/Users/kyclark/work/RepeatMasker/Matrices/ncbi/nt/25p41g.matrix";
+    const MATRIX: &str = "/Users/kyclark/work/RepeatMasker/Matrices/ncbi/nt/25p41g.matrix";
 
     #[test]
     fn test_align() -> Result<()> {
         let outdir = tempdir()?;
         let args = Args {
             consensi: PathBuf::from("tests/inputs/consensi.fa".to_string()),
-            instances: vec![PathBuf::from(
-                "tests/inputs/test_set.fa".to_string(),
-            )],
+            instances: vec![PathBuf::from("tests/inputs/test_set.fa".to_string())],
             alignment_matrix: Some(MATRIX.into()),
             outdir: outdir.path().into(),
             perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
             lambda: 0.1227,
             confidence_margin: 3,
             independence_threshold: 0.5,
-            aligner: Some(
-                "/Users/kyclark/work/RepeatModeler/util/align.pl".to_string(),
-            ),
-            refiner: Some(
-                "/Users/kyclark/work/RepeatModeler/Refiner".to_string(),
-            ),
+            aligner: Some("/Users/kyclark/work/RepeatModeler/util/align.pl".to_string()),
+            refiner: Some("/Users/kyclark/work/RepeatModeler/Refiner".to_string()),
             rmblast_dir: Some("/Users/kyclark/.local/bin".to_string()),
             num_threads: None,
             align_gap_init: -25,
@@ -1497,10 +1445,7 @@ mod tests {
 
     #[test]
     fn test_bitscore_to_confidence() -> Result<()> {
-        let res = bitscore_to_confidence(
-            &[&2274, &2234, &2224, &2245, &2295],
-            0.1227,
-        );
+        let res = bitscore_to_confidence(&[&2274, &2234, &2224, &2245, &2295], 0.1227);
         assert!(res.is_ok());
         assert_eq!(
             res.unwrap(),
@@ -1538,23 +1483,22 @@ mod tests {
         }
 
         // Winning sets should be symmetrical (A/B, B/A)
-        let expected_winning_sets: HashMap<StringPair, u32> =
-            HashMap::from([
-                (StringPair("AluYm1".to_string(), "AluY".to_string()), 28),
-                (StringPair("AluY".to_string(), "AluYm1".to_string()), 28),
-                //
-                (StringPair("AluYb8".to_string(), "AluYa5".to_string()), 3),
-                (StringPair("AluYa5".to_string(), "AluYb8".to_string()), 3),
-                //
-                (StringPair("AluYb8".to_string(), "AluYb9".to_string()), 4),
-                (StringPair("AluYb9".to_string(), "AluYb8".to_string()), 4),
-                //
-                (StringPair("AluY".to_string(), "AluYb8".to_string()), 3),
-                (StringPair("AluYb8".to_string(), "AluY".to_string()), 3),
-                //
-                (StringPair("AluY".to_string(), "AluYa5".to_string()), 7),
-                (StringPair("AluYa5".to_string(), "AluY".to_string()), 7),
-            ]);
+        let expected_winning_sets: HashMap<StringPair, u32> = HashMap::from([
+            (StringPair("AluYm1".to_string(), "AluY".to_string()), 28),
+            (StringPair("AluY".to_string(), "AluYm1".to_string()), 28),
+            //
+            (StringPair("AluYb8".to_string(), "AluYa5".to_string()), 3),
+            (StringPair("AluYa5".to_string(), "AluYb8".to_string()), 3),
+            //
+            (StringPair("AluYb8".to_string(), "AluYb9".to_string()), 4),
+            (StringPair("AluYb9".to_string(), "AluYb8".to_string()), 4),
+            //
+            (StringPair("AluY".to_string(), "AluYb8".to_string()), 3),
+            (StringPair("AluYb8".to_string(), "AluY".to_string()), 3),
+            //
+            (StringPair("AluY".to_string(), "AluYa5".to_string()), 7),
+            (StringPair("AluYa5".to_string(), "AluY".to_string()), 7),
+        ]);
 
         for (pair, score) in expected_winning_sets {
             let res = winners.winning_sets.get(&pair);
@@ -1690,24 +1634,17 @@ mod tests {
     #[test]
     fn test_extract_scores() -> Result<()> {
         let outdir = tempdir()?;
-        let consensi =
-            PathBuf::from("tests/inputs/numbered_consensi.fa".to_string());
+        let consensi = PathBuf::from("tests/inputs/numbered_consensi.fa".to_string());
         let alignment_file = PathBuf::from("tests/inputs/alignment.txt");
         let orig_scores: Option<PathBuf> = None;
-        let res = extract_scores(
-            &alignment_file,
-            &orig_scores,
-            &consensi,
-            outdir.path(),
-        );
+        let res = extract_scores(&alignment_file, &orig_scores, &consensi, outdir.path());
         assert!(res.is_ok());
 
         let scores_file = res.unwrap();
         assert!(scores_file.exists());
 
         let actual = fs::read_to_string(scores_file)?;
-        let expected =
-            fs::read_to_string("tests/outputs/alignment-scores.tsv")?;
+        let expected = fs::read_to_string("tests/outputs/alignment-scores.tsv")?;
         assert_eq!(actual, expected);
         Ok(())
     }
@@ -1772,10 +1709,7 @@ mod tests {
             format_seconds(one_hour + 121),
             "1 hour, 2 minutes, 1 second"
         );
-        assert_eq!(
-            format_seconds((one_hour * 4) + 59),
-            "4 hours, 59 seconds"
-        );
+        assert_eq!(format_seconds((one_hour * 4) + 59), "4 hours, 59 seconds");
         assert_eq!(format_seconds(one_day), "1 day");
         assert_eq!(format_seconds(one_day + 2), "1 day, 2 seconds");
         Ok(())
@@ -1886,8 +1820,7 @@ mod tests {
         assert!(res.is_ok());
 
         let actual = fs::read_to_string(outpath)?;
-        let expected =
-            fs::read_to_string("tests/outputs/numbered_consensi.fa")?;
+        let expected = fs::read_to_string("tests/outputs/numbered_consensi.fa")?;
         assert_eq!(actual, expected);
 
         Ok(())
