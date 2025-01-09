@@ -23,6 +23,21 @@ use std::{
 use walkdir::WalkDir;
 use which::which;
 
+//#[derive(Parser, Debug)]
+//#[command(arg_required_else_help = true, version, about)]
+//pub struct Cli {
+//    #[command(subcommand)]
+//    pub command: Option<Command>,
+//}
+//
+//#[derive(Parser, Debug)]
+//pub enum Command {
+//    /// Create sufr file
+//    Cluster(ClusterArgs),
+//
+//    Run(RunArgs)
+//}
+
 /// SCULU subfamily clustering tool
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -60,8 +75,8 @@ pub struct Args {
     pub refiner: Option<String>,
 
     /// Number of threads for rmblastn/Refiner
-    #[arg(long, value_name = "THREADS", default_value = "4")]
-    pub threads: i64,
+    #[arg(long, value_name = "THREADS")]
+    pub num_threads: Option<usize>,
 
     /// PERL5LIB, e.g., to find RepeatMasker/RepeatModeler
     #[arg(long, value_name = "PERL5LIB")]
@@ -132,8 +147,6 @@ struct RmBlastOutput<'a> {
     score: u32,
     target: &'a str,
     query: &'a str,
-    _qseq: Option<&'a str>,
-    _sseq: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -171,7 +184,7 @@ struct MergeFamilies<'a> {
     family2: String,
     outdir: PathBuf,
     instances_100_dir: &'a PathBuf,
-    threads: i64,
+    num_threads: usize,
     refiner: &'a Option<String>,
     log: &'a Option<LogLevel>,
     rmblast_dir: &'a Option<String>,
@@ -201,6 +214,9 @@ pub fn run(mut args: Args) -> Result<()> {
     if !args.outdir.is_dir() {
         fs::create_dir_all(&args.outdir)?;
     }
+
+    //align_consensi_to_self(&args)?;
+    //panic!("stop");
 
     // Take the longest 100 of the instances
     let instances_100_dir = args.outdir.join("instances_100");
@@ -235,7 +251,7 @@ pub fn run(mut args: Args) -> Result<()> {
 
     // Create a starting directory for the merge iterations.
     let top_outdir = args.outdir.clone();
-    let round0_dir = top_outdir.join(format!("round000"));
+    let round0_dir = top_outdir.join("round000");
     fs::create_dir_all(&round0_dir)?;
 
     // As the consensi are merged, the family names are concatenated
@@ -249,6 +265,7 @@ pub fn run(mut args: Args) -> Result<()> {
     args.consensi = consensi_path;
 
     // Start merging
+    let trailing_semi = Regex::new(";$").unwrap();
     let mut prev_scores: Option<PathBuf> = None;
     for round in 1.. {
         info!(">>> Round {round} <<<");
@@ -353,7 +370,7 @@ pub fn run(mut args: Args) -> Result<()> {
                     family2: pair.f2.clone(),
                     outdir,
                     instances_100_dir: &instances_100_dir,
-                    threads: args.threads,
+                    num_threads: args.num_threads.unwrap_or(num_cpus::get()),
                     refiner: &args.refiner,
                     log: &args.log,
                     rmblast_dir: &args.rmblast_dir,
@@ -362,7 +379,6 @@ pub fn run(mut args: Args) -> Result<()> {
                 &mut family_to_path,
             )?;
 
-            let trailing_semi = Regex::new(";$").unwrap();
             let new_family_newick = format!(
                 "({},{}):{:0.02};",
                 trailing_semi.replace(&pair.f1, ""),
@@ -418,6 +434,91 @@ pub fn run(mut args: Args) -> Result<()> {
         final_consensi_path.display(),
     );
 
+    Ok(())
+}
+
+// --------------------------------------------------
+fn align_consensi_to_self(args: &Args) -> Result<()> {
+    let outfile = args.outdir.join("consensi_cluster");
+
+    let rmblastn_args = vec![
+        "-num_alignments".to_string(),
+        "9999999".to_string(),
+        "-mask_level".to_string(),
+        args.align_mask_level.to_string(),
+        "-min_raw_gapped_score".to_string(),
+        args.align_min_score.to_string(),
+        "-num_threads".to_string(),
+        args.num_threads.unwrap_or(num_cpus::get()).to_string(),
+        "-db".to_string(),
+        args.consensi.to_string_lossy().to_string(),
+        "-query".to_string(),
+        args.consensi.to_string_lossy().to_string(),
+        "-out".to_string(),
+        outfile.to_string_lossy().to_string(),
+        "-outfmt".to_string(),
+        "6 score qseqid sseqid".to_string(),
+        // TODO: Verify these options
+        "-gapopen".to_string(),
+        "20".to_string(),
+        "-gapextend".to_string(),
+        "5".to_string(),
+        "-word_size".to_string(),
+        "7".to_string(),
+        "-xdrop_ungap".to_string(),
+        "400".to_string(),
+        "-xdrop_gap_final".to_string(),
+        "200".to_string(),
+        "-xdrop_gap".to_string(),
+        "100".to_string(),
+        "-dust".to_string(),
+        "no".to_string(),
+        // TODO: verify remove
+        //"-complexity_adjust".to_string(),
+    ];
+
+    let rmblastn = match &args.aligner {
+        Some(path) => PathBuf::from(path.to_string()),
+        _ => which("rmblastn")?,
+    };
+    let mut cmd = Command::new(&rmblastn);
+    if let Some(perl5lib) = &args.perl5lib {
+        cmd.env("PERL5LIB", perl5lib);
+    }
+
+    // Needed?
+    //if let Some(matrix) = &args.alignment_matrix {
+    //    let filename = matrix.file_name().unwrap_or_else(|| {
+    //        panic!("Failed to get filename from '{}'", matrix.display())
+    //    });
+    //
+    //    let dirname = matrix.parent().unwrap_or_else(|| {
+    //        panic!("Failed to get dirname from '{}'", matrix.display())
+    //    });
+    //
+    //    cmd.env("BLASTMAT", dirname);
+    //    rmblastn_args.extend_from_slice(&[
+    //        "-matrix".to_string(),
+    //        filename.to_string_lossy().to_string(),
+    //    ]);
+    //}
+
+    debug!(
+        "Running '{} {}'",
+        rmblastn.display(),
+        rmblastn_args.join(" ")
+    );
+
+    let start = Instant::now();
+    let res = cmd.args(rmblastn_args).output()?;
+    if !res.status.success() {
+        bail!(String::from_utf8(res.stderr)?);
+    }
+
+    info!(
+        "Consensi self-alignment finished in {}",
+        format_seconds(start.elapsed().as_secs())
+    );
     Ok(())
 }
 
@@ -506,7 +607,7 @@ fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
         "ndb", "nhr", "nin", "njs", "nog", "nos", "not", "nsq", "ntf", "nto",
     ]
     .iter()
-    .map(|ext| OsStr::new(ext))
+    .map(OsStr::new)
     .collect();
 
     let blast_db_dir = &args.consensi.parent().expect("blast db dir");
@@ -554,7 +655,7 @@ fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
         "-min_raw_gapped_score".to_string(),
         args.align_min_score.to_string(),
         "-num_threads".to_string(),
-        args.threads.to_string(),
+        args.num_threads.unwrap_or(num_cpus::get()).to_string(),
         "-db".to_string(),
         args.consensi.to_string_lossy().to_string(),
         "-query".to_string(),
@@ -562,7 +663,7 @@ fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
         "-out".to_string(),
         alignment_outfile.to_string_lossy().to_string(),
         "-outfmt".to_string(),
-        "6 score qseqid sseqid qseq sseq".to_string(),
+        "6 score qseqid sseqid".to_string(),
         // TODO: Verify these options
         "-gapopen".to_string(),
         "20".to_string(),
@@ -592,15 +693,13 @@ fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
     }
 
     if let Some(matrix) = &args.alignment_matrix {
-        let filename = matrix.file_name().expect(&format!(
-            "Failed to get filename from '{}'",
-            matrix.display()
-        ));
+        let filename = matrix.file_name().unwrap_or_else(|| {
+            panic!("Failed to get filename from '{}'", matrix.display())
+        });
 
-        let dirname = matrix.parent().expect(&format!(
-            "Failed to get dirname from '{}'",
-            matrix.display()
-        ));
+        let dirname = matrix.parent().unwrap_or_else(|| {
+            panic!("Failed to get dirname from '{}'", matrix.display())
+        });
 
         cmd.env("BLASTMAT", dirname);
         rmblastn_args.extend_from_slice(&[
@@ -782,7 +881,7 @@ fn check_family_instances(
     consensi_file: &PathBuf,
     instances_100: &[PathBuf],
 ) -> Result<HashMap<String, PathBuf>> {
-    let mut reader = parse_reader(open(&consensi_file)?)?;
+    let mut reader = parse_reader(open(consensi_file)?)?;
     let mut consensi_names: HashMap<String, u32> = HashMap::new();
     while let Some(rec) = reader.iter_record()? {
         consensi_names
@@ -896,7 +995,7 @@ fn extract_scores(
     alignment_file: &PathBuf,
     prev_scores_file: &Option<PathBuf>,
     consensi: &PathBuf,
-    outdir: &PathBuf,
+    outdir: &Path,
 ) -> Result<PathBuf> {
     debug!(
         "Extracting scores from alignment '{}' {:?}",
@@ -904,7 +1003,7 @@ fn extract_scores(
         prev_scores_file
     );
 
-    let mut reader = parse_reader(open(&consensi)?)?;
+    let mut reader = parse_reader(open(consensi)?)?;
     let mut consensi_names: HashMap<String, String> = HashMap::new();
     while let Some(rec) = reader.iter_record()? {
         consensi_names.insert(
@@ -1130,8 +1229,8 @@ fn merge_families(
 
     let fams1 = parse_newick(&args.family1);
     let fams2 = parse_newick(&args.family2);
-    let num_fams1 = fams1.iter().count() as f64;
-    let num_fams2 = fams2.iter().count() as f64;
+    let num_fams1 = fams1.len() as f64;
+    let num_fams2 = fams2.len() as f64;
     let num_fams_total = num_fams1 + num_fams2;
     let num_seqs_total = 100;
     let num_from1 = (num_seqs_total as f64 * (num_fams1 / num_fams_total))
@@ -1179,7 +1278,7 @@ fn merge_families(
     };
 
     let mut refiner_args =
-        vec!["-threads".to_string(), args.threads.to_string()];
+        vec!["-threads".to_string(), args.num_threads.to_string()];
 
     if let Some(LogLevel::Debug) = args.log {
         refiner_args.push("-debug".to_string())
@@ -1372,7 +1471,7 @@ mod tests {
                 "/Users/kyclark/work/RepeatModeler/Refiner".to_string(),
             ),
             rmblast_dir: Some("/Users/kyclark/.local/bin".to_string()),
-            threads: 4,
+            num_threads: None,
             align_gap_init: -25,
             align_extension: -5,
             align_min_match: 7,
@@ -1399,7 +1498,7 @@ mod tests {
     #[test]
     fn test_bitscore_to_confidence() -> Result<()> {
         let res = bitscore_to_confidence(
-            &vec![&2274, &2234, &2224, &2245, &2295],
+            &[&2274, &2234, &2224, &2245, &2295],
             0.1227,
         );
         assert!(res.is_ok());
@@ -1483,7 +1582,7 @@ mod tests {
 
         let mut reader = parse_reader(open(&outpath)?)?;
         let mut count = 0;
-        while let Some(_) = reader.iter_record()? {
+        while (reader.iter_record()?).is_some() {
             count += 1;
         }
         assert_eq!(count, 500);
@@ -1556,7 +1655,7 @@ mod tests {
             let sub = File::open(&outpath)?;
             let mut reader = parse_reader(sub)?;
             let mut num = 0;
-            while let Some(_) = reader.iter_record()? {
+            while (reader.iter_record()?).is_some() {
                 num += 1;
             }
 
@@ -1577,7 +1676,7 @@ mod tests {
             let sub = File::open(&outpath)?;
             let mut reader = parse_reader(sub)?;
             let mut num = 0;
-            while let Some(_) = reader.iter_record()? {
+            while (reader.iter_record()?).is_some() {
                 num += 1;
             }
 
@@ -1599,7 +1698,7 @@ mod tests {
             &alignment_file,
             &orig_scores,
             &consensi,
-            &outdir.path().to_path_buf(),
+            outdir.path(),
         );
         assert!(res.is_ok());
 

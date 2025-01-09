@@ -7,7 +7,6 @@ run:
 		--log debug \
 		--independence-threshold .8 \
 		--confidence-margin 3 \
-		--threads 8 \
         --rmblast-dir /Users/kyclark/.local/bin \
 		--alignment-matrix $(MATRIX) 
 
@@ -22,7 +21,6 @@ alu:
 		--instances data/alu/subfams/*.fa \
 		--log debug \
 		--outdir ./sculu-alu \
-		--threads 8 \
 		--rmblast-dir /Users/kyclark/.local/bin \
 		--alignment-matrix $(MATRIX) 
 
