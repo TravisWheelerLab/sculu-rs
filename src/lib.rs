@@ -298,9 +298,12 @@ fn run_batch<W: Write>(
 
     // Create a consensi file for this round containing only the given families
     let mut consensi = outdir.join("consensi.fa");
-    let outfile = BufWriter::new(File::create(&consensi)?);
-    let mut fasta_writer = FastaWriter::new(outfile);
-    copy_fasta(&families, &args.consensi, &mut fasta_writer)?;
+    {
+        // Scoped to cause fasta_writer to close
+        let outfile = BufWriter::new(File::create(&consensi)?);
+        let mut fasta_writer = FastaWriter::new(outfile);
+        copy_fasta(&families, &args.consensi, &mut fasta_writer)?;
+    }
 
     // Check that the "consensi" sequences have clear relationships
     // to "instance" files. Returns a mutable hashmap from the
@@ -488,16 +491,17 @@ fn run_batch<W: Write>(
         consensi = new_consensi_path.to_path_buf();
     }
 
-    for (name, seq) in &consensi_seqs {
-        let definition = FastaDefinition::new(name.clone(), None);
-        let sequence = FastaSequence::from(seq.as_bytes().to_vec());
-        let record = FastaRecord::new(definition.clone(), sequence);
+    let mut reader = FastaReader::new(BufReader::new(File::open(consensi)?));
+    let mut new_seqs = 0;
+    for result in reader.records() {
+        let record = result?;
         final_writer.write_record(&record)?;
+        new_seqs += 1;
     }
 
     println!(
-        "Added {} in {}.",
-        &consensi_seqs.len(),
+        "Added {new_seqs} famil{} in {}.",
+        if new_seqs == 1 { "" } else { "ies" },
         format_seconds(start.elapsed().as_secs()),
     );
 
@@ -656,12 +660,19 @@ fn run_rmblastn(
 
 // --------------------------------------------------
 fn bitscore_to_confidence(vals: &[&u32], lambda: f64) -> Result<Vec<f64>> {
-    dbg!(&vals);
-    dbg!(&lambda);
-    let converted: Vec<_> = vals.iter().map(|&&v| (v as f64 * lambda).exp2()).collect();
-    dbg!(&converted);
+    let mut converted: Vec<_> =
+        vals.iter().map(|&&v| (v as f64 * lambda).exp2()).collect();
+
+    if converted.iter().any(|v| v.is_infinite()) {
+        // Scale all numbers down
+        let delta = **vals.iter().max().unwrap() as i64 - 500;
+        converted = vals
+            .iter()
+            .map(|&&v| ((v as i64 - delta) as f64 * lambda).exp2())
+            .collect::<Vec<_>>();
+    }
+
     let total: f64 = converted.iter().sum();
-    dbg!(&total);
     if total > 0. {
         Ok(converted.into_iter().map(|v| v / total).collect())
     } else {
@@ -828,7 +839,7 @@ fn call_winners(
     let mut clear_winners: HashMap<String, u32> = HashMap::new();
     let mut winning_sets: HashMap<StringPair, u32> = HashMap::new();
     for (target, bit_scores) in scores.iter() {
-        debug!("\n>>> {target} = {bit_scores:?}");
+        //debug!("\n>>> {target} = {bit_scores:?}");
         let families: Vec<_> = bit_scores.keys().collect();
         let raw_scores: Vec<_> = bit_scores.values().collect();
         let conf: Vec<_> = bitscore_to_confidence(&raw_scores, lambda)?;
@@ -877,7 +888,6 @@ fn call_winners(
             .map(|(fam, _)| fam.to_string())
             .collect();
 
-        dbg!(&conf);
         if winners.len() == 1 {
             let winner = winners.first().unwrap();
             clear_winners
@@ -887,7 +897,6 @@ fn call_winners(
             //debug!("Clear Winner: {winner}");
         } else {
             let mut fam_comps: Vec<_> = conf.iter().zip(families).collect();
-            dbg!(&fam_comps);
             fam_comps.sort_by(|a, b| {
                 b.0.partial_cmp(a.0).unwrap().then_with(|| a.1.cmp(b.1))
             });
@@ -962,6 +971,7 @@ fn check_family_instances(
     consensi_file: &PathBuf,
     instances_100_dir: &PathBuf,
 ) -> Result<HashMap<String, PathBuf>> {
+    println!("Checking consensi_file {}", consensi_file.display());
     let mut reader = parse_reader(open(consensi_file)?)?;
     let mut consensi_names: HashMap<String, u32> = HashMap::new();
     while let Some(rec) = reader.iter_record()? {
@@ -987,6 +997,7 @@ fn check_family_instances(
 
     let mut consensi_names: Vec<String> = consensi_names.keys().cloned().collect();
     consensi_names.sort();
+    dbg!(&consensi_names);
 
     let mut family_to_path: HashMap<String, PathBuf> = HashMap::new();
     for entry in fs::read_dir(instances_100_dir)? {
@@ -999,13 +1010,16 @@ fn check_family_instances(
             _ => bail!("Cannot get filename from {}", path.display()),
         };
     }
+    dbg!(&family_to_path);
 
     let instance_names: HashSet<String> = family_to_path.keys().cloned().collect();
+    dbg!(&instance_names);
 
     let missing_instances: Vec<_> = consensi_names
         .into_iter()
         .filter(|name| !instance_names.contains(name))
         .collect();
+    dbg!(&missing_instances);
 
     if !missing_instances.is_empty() {
         bail!(
