@@ -1,3 +1,5 @@
+mod graph;
+
 use anyhow::{anyhow, bail, Result};
 use assert_cmd::Command;
 use chrono::Duration;
@@ -7,41 +9,31 @@ use itertools::Itertools;
 use kseq::parse_reader;
 use log::{debug, info};
 use newick::Newick;
+use noodles_fasta::{
+    self,
+    io::Reader as FastaReader,
+    io::Writer as FastaWriter,
+    record::{
+        Definition as FastaDefinition, Record as FastaRecord, Sequence as FastaSequence,
+    },
+};
 use rand::{seq::SliceRandom, thread_rng};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp,
     collections::{HashMap, HashSet},
-    ffi::OsStr,
     fmt,
     fs::{self, File},
     io::{BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     time::Instant,
 };
-use walkdir::WalkDir;
+//use walkdir::WalkDir;
 use which::which;
 
-mod graph;
-
-//#[derive(Parser, Debug)]
-//#[command(arg_required_else_help = true, version, about)]
-//pub struct Cli {
-//    #[command(subcommand)]
-//    pub command: Option<Command>,
-//}
-//
-//#[derive(Parser, Debug)]
-//pub enum Command {
-//    /// Create sufr file
-//    Cluster(ClusterArgs),
-//
-//    Run(RunArgs)
-//}
-
 /// SCULU subfamily clustering tool
-#[derive(Debug, Parser)]
+#[derive(Debug, Parser, Clone)]
 #[command(author, version, about)]
 pub struct Args {
     /// FASTA file of subfamily consensi
@@ -92,21 +84,37 @@ pub struct Args {
     #[arg(long, value_name = "MATRIX")]
     pub alignment_matrix: Option<PathBuf>,
 
-    /// Alignment gap init
-    #[arg(long, value_name = "GAPINIT", default_value = "-25")]
-    pub align_gap_init: i64,
+    /// Alignment gap open penalty
+    #[arg(long, value_name = "ALIGN_GAP_OPEN", default_value = "20")]
+    pub align_gap_open: usize,
 
-    /// Alignment extension
-    #[arg(long, value_name = "EXT", default_value = "-5")]
-    pub align_extension: i64,
+    /// Alignment gap extension penalty
+    #[arg(long, value_name = "ALIGN_GAP_EXT", default_value = "5")]
+    pub align_gap_extension: usize,
 
-    /// Alignment minimum match
-    #[arg(long, value_name = "MINMATCH", default_value = "7")]
-    pub align_min_match: i64,
+    /// Alignment word size
+    #[arg(long, value_name = "ALIGN_WORD_SIZE", default_value = "7")]
+    pub align_word_size: usize,
 
-    /// Alignment bandwidth
-    #[arg(long, value_name = "BANDWIDTH", default_value = "14")]
-    pub align_bandwidth: i64,
+    /// Alignment x-drop ungap
+    #[arg(long, value_name = "ALIGN_XDROP_UNGAP", default_value = "400")]
+    pub align_xdrop_ungap: usize,
+
+    /// Alignment x-drop final
+    #[arg(long, value_name = "ALIGN_XDROP_FINAL", default_value = "200")]
+    pub align_xdrop_final: usize,
+
+    /// Alignment x-drop gap
+    #[arg(long, value_name = "ALIGN_XDROP_GAP", default_value = "100")]
+    pub align_xdrop_gap: usize,
+
+    /// Alignment dust option
+    #[arg(long)]
+    pub align_dust: bool,
+
+    /// Alignment complexity adjust
+    #[arg(long)]
+    pub align_complexity_adjust: bool,
 
     /// Alignment mask level
     #[arg(long, value_name = "MASKLEVEL", default_value = "101")]
@@ -144,11 +152,11 @@ impl ValueEnum for LogLevel {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct RmBlastOutput<'a> {
+#[derive(Debug, Deserialize, Clone)]
+struct RmBlastOutput {
     score: u32,
-    target: &'a str,
-    query: &'a str,
+    target: String,
+    query: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -194,9 +202,7 @@ struct MergeFamilies<'a> {
 }
 
 // --------------------------------------------------
-pub fn run(mut args: Args) -> Result<()> {
-    let start = Instant::now();
-
+pub fn run(args: Args) -> Result<()> {
     env_logger::Builder::new()
         .filter_level(match args.log {
             Some(LogLevel::Debug) => log::LevelFilter::Debug,
@@ -217,28 +223,94 @@ pub fn run(mut args: Args) -> Result<()> {
         fs::create_dir_all(&args.outdir)?;
     }
 
-    //align_consensi_to_self(&args)?;
-    //panic!("stop");
-
     // Take the longest 100 of the instances
-    let instances_100_dir = args.outdir.join("instances_100");
+    let instances_100_dir = &args.outdir.join("instances_100");
     debug!(
         "Writing 100 longest instances to '{}'",
         instances_100_dir.display()
     );
-    fs::create_dir_all(&instances_100_dir)?;
-    let instances_100 = take_longest_100(&args, &instances_100_dir)?;
+    fs::create_dir_all(instances_100_dir)?;
+    let instances_100 = take_longest_100(&args, instances_100_dir)?;
     debug!("instances_100 = '{instances_100:#?}'");
 
+    // Final output file
+    let outpath = args.outdir.join("families.fa");
+    let outfile = BufWriter::new(File::create(outpath)?);
+    let mut fasta_writer = FastaWriter::new(outfile);
+
+    let mut components = align_consensi_to_self(&args)?;
+    components.sort_by_key(|v| v.len());
+
+    let mut batch_num = 0;
+    for families in components {
+        if families.len() == 1 {
+            info!("Extracting '{}'", families[0]);
+            copy_fasta(&families, &args.consensi, &mut fasta_writer)?
+        } else {
+            batch_num += 1;
+            run_batch(
+                batch_num,
+                families,
+                args.clone(),
+                instances_100_dir,
+                &mut fasta_writer,
+            )?
+        }
+    }
+
+    Ok(())
+}
+
+// --------------------------------------------------
+fn copy_fasta<W: Write>(
+    family_names: &Vec<String>,
+    source: &PathBuf,
+    destination: &mut FastaWriter<W>,
+) -> Result<()> {
+    let mut reader = FastaReader::new(BufReader::new(File::open(source)?));
+
+    for result in reader.records() {
+        let record = result?;
+        let record_name = String::from_utf8(record.name().to_vec())?;
+        if family_names.contains(&record_name) {
+            destination.write_record(&record)?;
+        }
+    }
+
+    Ok(())
+}
+
+// --------------------------------------------------
+fn run_batch<W: Write>(
+    batch_num: usize,
+    families: Vec<String>,
+    args: Args,
+    instances_100_dir: &PathBuf,
+    final_writer: &mut FastaWriter<W>,
+) -> Result<()> {
+    info!(
+        "==> Running batch {batch_num} for families {} <==",
+        families.join(", ")
+    );
+    let start = Instant::now();
+    let outdir = args.outdir.join(format!("batch{batch_num:03}"));
+    fs::create_dir_all(&outdir)?;
+
+    // Create a consensi file for this round containing only the given families
+    let mut consensi = outdir.join("consensi.fa");
+    let outfile = BufWriter::new(File::create(&consensi)?);
+    let mut fasta_writer = FastaWriter::new(outfile);
+    copy_fasta(&families, &args.consensi, &mut fasta_writer)?;
+
     // Check that the "consensi" sequences have clear relationships
-    // to "instances" files. Returns a mutable hashmap from the
+    // to "instance" files. Returns a mutable hashmap from the
     // family names to their instance files for merges.
     debug!("Checking family names/instances");
-    let mut family_to_path = check_family_instances(&args.consensi, &instances_100)?;
+    let mut family_to_path = check_family_instances(&consensi, &instances_100_dir)?;
     debug!("family_to_path = '{family_to_path:#?}'");
 
-    // Concatenate the longest 100 into a single file for alignment
-    let all_seqs_path = &args.outdir.join("all_seqs.fa");
+    // Create query file for families
+    let all_seqs_path = &outdir.join("all_seqs.fa");
     debug!(
         "Concatenating all instance sequences into '{}'",
         all_seqs_path.display()
@@ -248,11 +320,10 @@ pub fn run(mut args: Args) -> Result<()> {
     //cat_sequences(&instances_100, all_seqs_path)?;
 
     // Alternative is to use *all* the sequences
-    cat_sequences(&args.instances, all_seqs_path)?;
+    cat_sequences(&args.instances, &families, all_seqs_path)?;
 
     // Create a starting directory for the merge iterations.
-    let top_outdir = args.outdir.clone();
-    let round0_dir = top_outdir.join("round000");
+    let round0_dir = outdir.join("round000");
     fs::create_dir_all(&round0_dir)?;
 
     // As the consensi are merged, the family names are concatenated
@@ -262,32 +333,29 @@ pub fn run(mut args: Args) -> Result<()> {
     // and move the family names to the description.
     let consensi_path = round0_dir.join("consensi.fa");
     debug!("Writing consensi to '{}'", consensi_path.display());
-    let mut consensi_seqs = number_consensi(&args.consensi, &consensi_path)?;
-    args.consensi = consensi_path;
+    let mut consensi_seqs = number_consensi(&consensi, &consensi_path)?;
+    consensi = consensi_path;
 
     // Start merging
     let trailing_semi = Regex::new(";$").unwrap();
     let mut prev_scores: Option<PathBuf> = None;
     for round in 1.. {
         info!(">>> Round {round} <<<");
-        args.outdir = top_outdir.join(format!("round{round:03}"));
-        fs::create_dir_all(&args.outdir)?;
+        let round_dir = outdir.join(format!("round{round:03}"));
+        fs::create_dir_all(&round_dir)?;
 
         // Align all the sequences to the current consensi.
         // On the first round, all the original consensi will be included.
         // On future rounds, only the newly merged consensi will be present.
-        let alignment_file = align(&args, all_seqs_path)?;
+        //let alignment_file = align(&args, all_seqs_path)?;
+        let alignment_file = run_rmblastn(&args, &round_dir, &consensi, all_seqs_path)?;
 
         // Extract the scores from the alignment file.
         // On the first round, there will be no "prev_scores" file.
         // On the following rounds, the previous round's scores will be
         // included for those families that were not merged.
-        let scores_file = extract_scores(
-            &alignment_file,
-            &prev_scores,
-            &args.consensi,
-            &args.outdir,
-        )?;
+        let scores_file =
+            extract_scores(&alignment_file, &prev_scores, &consensi, &round_dir)?;
 
         // Save this round's alignment scores for the next
         prev_scores = Some(scores_file.clone());
@@ -323,7 +391,7 @@ pub fn run(mut args: Args) -> Result<()> {
 
         // Merge the least independent families.
         // The new consensi file will only contain the merged families.
-        let new_consensi_path = args.outdir.join("new-consensi.fa");
+        let new_consensi_path = &round_dir.join("new-consensi.fa");
         let mut new_consensi = open_for_write(&new_consensi_path)?;
         let mut merge_num = 0;
         let mut already_merged: HashSet<String> = HashSet::new();
@@ -363,13 +431,13 @@ pub fn run(mut args: Args) -> Result<()> {
             );
 
             // Place all merge artefacts into a directory.
-            let outdir = args.outdir.join(format!("msa-{merge_num:02}"));
+            let msa_dir = &round_dir.join(format!("msa-{merge_num:02}"));
             let new_consensus_seq = merge_families(
                 MergeFamilies {
                     family1: pair.f1.clone(),
                     family2: pair.f2.clone(),
-                    outdir,
-                    instances_100_dir: &instances_100_dir,
+                    outdir: msa_dir.to_path_buf(),
+                    instances_100_dir,
                     num_threads: args.num_threads.unwrap_or(num_cpus::get()),
                     refiner: &args.refiner,
                     log: &args.log,
@@ -417,292 +485,152 @@ pub fn run(mut args: Args) -> Result<()> {
             "Wrote {merge_num} consensi to '{}'",
             new_consensi_path.display()
         );
-        args.consensi = new_consensi_path;
+        consensi = new_consensi_path.to_path_buf();
     }
 
-    let final_consensi_path = args.outdir.join("final-consensi.fa");
-    let mut final_consensi = open_for_write(&final_consensi_path)?;
-    for (i, (name, seq)) in consensi_seqs.iter().enumerate() {
-        writeln!(final_consensi, ">{} {name}\n{seq}", i + 1,)?;
+    for (name, seq) in &consensi_seqs {
+        let definition = FastaDefinition::new(name.clone(), None);
+        let sequence = FastaSequence::from(seq.as_bytes().to_vec());
+        let record = FastaRecord::new(definition.clone(), sequence);
+        final_writer.write_record(&record)?;
     }
 
     println!(
-        "Finished in {}. Wrote {} final consensi to '{}'",
+        "Added {} in {}.",
+        &consensi_seqs.len(),
         format_seconds(start.elapsed().as_secs()),
-        consensi_seqs.len(),
-        final_consensi_path.display(),
     );
 
     Ok(())
 }
 
 // --------------------------------------------------
-fn align_consensi_to_self(args: &Args) -> Result<()> {
-    let outfile = args.outdir.join("consensi_cluster");
+// Align the consensi to itself to identify clusters
+// [
+//     [ "Charlie13a" ],
+//     [ "Tigger3c" ],
+//     [ "AluSc", "AluYm1", "AluYh3", "AluYh9", "AluYb8", "AluYb9" ],
+//     [ "Charlie1a", "Charlie1", "Charlie2a", "Charlie2b" ],
+// ]
+fn align_consensi_to_self(args: &Args) -> Result<Vec<Vec<String>>> {
+    let outdir = args.outdir.join("consensi_cluster");
+    let output = run_rmblastn(args, &outdir, &args.consensi, &args.consensi)?;
+    Ok(graph::connected_components(parse_alignment(&output)?))
+}
 
-    let rmblastn_args = vec![
-        "-num_alignments".to_string(),
-        "9999999".to_string(),
-        "-mask_level".to_string(),
-        args.align_mask_level.to_string(),
-        "-min_raw_gapped_score".to_string(),
-        args.align_min_score.to_string(),
-        "-num_threads".to_string(),
-        args.num_threads.unwrap_or(num_cpus::get()).to_string(),
-        "-db".to_string(),
-        args.consensi.to_string_lossy().to_string(),
-        "-query".to_string(),
-        args.consensi.to_string_lossy().to_string(),
-        "-out".to_string(),
-        outfile.to_string_lossy().to_string(),
-        "-outfmt".to_string(),
-        "6 score qseqid sseqid".to_string(),
-        // TODO: Verify these options
-        "-gapopen".to_string(),
-        "20".to_string(),
-        "-gapextend".to_string(),
-        "5".to_string(),
-        "-word_size".to_string(),
-        "7".to_string(),
-        "-xdrop_ungap".to_string(),
-        "400".to_string(),
-        "-xdrop_gap_final".to_string(),
-        "200".to_string(),
-        "-xdrop_gap".to_string(),
-        "100".to_string(),
-        "-dust".to_string(),
-        "no".to_string(),
-        // TODO: verify remove
-        //"-complexity_adjust".to_string(),
-    ];
+// --------------------------------------------------
+fn parse_alignment(blast_out: &PathBuf) -> Result<Vec<RmBlastOutput>> {
+    // BLAST output fails to include headers
+    let mut reader = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .from_path(blast_out)?;
 
-    let rmblastn = match &args.aligner {
-        Some(path) => PathBuf::from(path.to_string()),
-        _ => which("rmblastn")?,
-    };
-    let mut cmd = Command::new(&rmblastn);
-    if let Some(perl5lib) = &args.perl5lib {
-        cmd.env("PERL5LIB", perl5lib);
+    let mut records = vec![];
+    for res in reader.records() {
+        let rec = res?;
+        let blast_rec: RmBlastOutput = rec.deserialize(None)?;
+        records.push(blast_rec);
     }
 
-    // Needed?
-    //if let Some(matrix) = &args.alignment_matrix {
-    //    let filename = matrix.file_name().unwrap_or_else(|| {
-    //        panic!("Failed to get filename from '{}'", matrix.display())
-    //    });
-    //
-    //    let dirname = matrix.parent().unwrap_or_else(|| {
-    //        panic!("Failed to get dirname from '{}'", matrix.display())
-    //    });
-    //
-    //    cmd.env("BLASTMAT", dirname);
-    //    rmblastn_args.extend_from_slice(&[
-    //        "-matrix".to_string(),
-    //        filename.to_string_lossy().to_string(),
-    //    ]);
-    //}
+    Ok(records)
+}
 
-    debug!(
-        "Running '{} {}'",
-        rmblastn.display(),
-        rmblastn_args.join(" ")
-    );
+// --------------------------------------------------
+fn run_rmblastn(
+    args: &Args,
+    outdir: &PathBuf,
+    db: &Path,
+    query: &Path,
+) -> Result<PathBuf> {
+    fs::create_dir_all(outdir)?;
+    let db_path = &outdir.join("db");
 
-    let start = Instant::now();
-    let res = cmd.args(rmblastn_args).output()?;
+    // See if we need to make the BLAST db
+    //if blast_files.len() < blast_suffixes.len() {
+    info!("Making BLAST db '{}'", db_path.display());
+    let mut makeblastdb_cmd = Command::new("makeblastdb");
+    let makeblastdb_args = &[
+        "-out".to_string(),
+        db_path.to_string_lossy().to_string(),
+        "-parse_seqids".to_string(),
+        "-dbtype".to_string(),
+        "nucl".to_string(),
+        "-in".to_string(),
+        db.to_string_lossy().to_string(),
+    ];
+
+    debug!("Running 'makeblastdb {}'", &makeblastdb_args.join(" "));
+    let res = makeblastdb_cmd.args(makeblastdb_args).output()?;
     if !res.status.success() {
         bail!(String::from_utf8(res.stderr)?);
     }
 
-    info!(
-        "Consensi self-alignment finished in {}",
-        format_seconds(start.elapsed().as_secs())
-    );
-    Ok(())
-}
-
-// --------------------------------------------------
-// TODO: remove
-//fn _align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
-//    // Perform alignment to query
-//    let mut align_args = vec![
-//        // Don't do complexity adjustment
-//        "-raw".to_string(),
-//        "-rmblast".to_string(),
-//        "-threads".to_string(),
-//        args.threads.to_string(),
-//        "-gap_init".to_string(),
-//        args.align_gap_init.to_string(),
-//        "-extension".to_string(),
-//        args.align_extension.to_string(),
-//        "-minmatch".to_string(),
-//        args.align_min_match.to_string(),
-//        "-bandwidth".to_string(),
-//        args.align_bandwidth.to_string(),
-//        "-masklevel".to_string(),
-//        args.align_mask_level.to_string(),
-//        "-minscore".to_string(),
-//        args.align_min_score.to_string(),
-//    ];
-
-//    if let Some(matrix) = &args.alignment_matrix {
-//        align_args.extend_from_slice(&[
-//            "-matrix".to_string(),
-//            matrix.to_string_lossy().to_string(),
-//        ]);
-//    }
-
-//    align_args.extend_from_slice(&[
-//        "-alignments".to_string(),
-//        all_seqs_path.to_string_lossy().to_string(),
-//        args.consensi.to_string_lossy().to_string(),
-//    ]);
-
-//    let start = Instant::now();
-//    let aligner = match &args.aligner {
-//        Some(path) => PathBuf::from(path.to_string()),
-//        _ => which("align.pl")?,
-//    };
-
-//    debug!("Running '{} {}'", aligner.display(), align_args.join(" "));
-
-//    let mut cmd = Command::new(&aligner);
-//    if let Some(perl5lib) = &args.perl5lib {
-//        cmd.env("PERL5LIB", perl5lib);
-//    }
-
-//    let res = cmd.args(align_args).output()?;
-//    if !res.status.success() {
-//        bail!(String::from_utf8(res.stderr)?);
-//    }
-
-//    info!(
-//        "Alignment finished in {}",
-//        format_seconds(start.elapsed().as_secs())
-//    );
-
-//    let alignment_outfile = args.outdir.join("alignment.txt");
-//    let mut output = open_for_write(&alignment_outfile)?;
-//    output.write_all(&res.stdout)?;
-
-//    Ok(alignment_outfile)
-//}
-
-// --------------------------------------------------
-fn bitscore_to_confidence(vals: &[&u32], lambda: f64) -> Result<Vec<f64>> {
-    let converted: Vec<_> = vals.iter().map(|&&v| (v as f64 * lambda).exp2()).collect();
-    let total: f64 = converted.iter().sum();
-    if total > 0. {
-        Ok(converted.into_iter().map(|v| v / total).collect())
-    } else {
-        bail!("Sum of converted values equals zero")
-    }
-}
-
-// --------------------------------------------------
-fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
-    let blast_suffixes: HashSet<_> = [
-        "ndb", "nhr", "nin", "njs", "nog", "nos", "not", "nsq", "ntf", "nto",
-    ]
-    .iter()
-    .map(OsStr::new)
-    .collect();
-
-    let blast_db_dir = &args.consensi.parent().expect("blast db dir");
-    let blast_files: Vec<_> = WalkDir::new(blast_db_dir)
-        .max_depth(0)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| {
-            // Find files
-            e.file_type().is_file()
-                // With a nonzero size
-                && e.metadata().unwrap().len() > 0
-                // With a BLAST db suffix
-                && blast_suffixes.contains(e.path().extension().unwrap())
-        })
-        .collect();
-
-    // See if we need to make the BLAST db
-    if blast_files.len() < blast_suffixes.len() {
-        info!("Making BLAST db");
-        let mut makeblastdb_cmd = Command::new("makeblastdb");
-        let makeblastdb_args = &[
-            "-out".to_string(),
-            args.consensi.to_string_lossy().to_string(),
-            "-parse_seqids".to_string(),
-            "-dbtype".to_string(),
-            "nucl".to_string(),
-            "-in".to_string(),
-            args.consensi.to_string_lossy().to_string(),
-        ];
-
-        debug!("Running 'makeblastdb {}'", &makeblastdb_args.join(" "));
-        let res = makeblastdb_cmd.args(makeblastdb_args).output()?;
-        if !res.status.success() {
-            bail!(String::from_utf8(res.stderr)?);
-        }
-    }
-
-    let alignment_outfile = args.outdir.join("alignment.txt");
+    let outfile = outdir.join("blast.out");
     let mut rmblastn_args = vec![
+        "-db".to_string(),
+        db_path.to_string_lossy().to_string(),
+        "-query".to_string(),
+        query.to_string_lossy().to_string(),
+        "-out".to_string(),
+        outfile.to_string_lossy().to_string(),
+        "-outfmt".to_string(),
+        "6 score qseqid sseqid".to_string(),
+        "-num_threads".to_string(),
+        args.num_threads.unwrap_or(num_cpus::get()).to_string(),
         "-num_alignments".to_string(),
         "9999999".to_string(),
         "-mask_level".to_string(),
         args.align_mask_level.to_string(),
         "-min_raw_gapped_score".to_string(),
         args.align_min_score.to_string(),
-        "-num_threads".to_string(),
-        args.num_threads.unwrap_or(num_cpus::get()).to_string(),
-        "-db".to_string(),
-        args.consensi.to_string_lossy().to_string(),
-        "-query".to_string(),
-        all_seqs_path.to_string_lossy().to_string(),
-        "-out".to_string(),
-        alignment_outfile.to_string_lossy().to_string(),
-        "-outfmt".to_string(),
-        "6 score qseqid sseqid".to_string(),
-        // TODO: Verify these options
         "-gapopen".to_string(),
-        "20".to_string(),
+        args.align_gap_open.to_string(),
         "-gapextend".to_string(),
-        "5".to_string(),
+        args.align_gap_extension.to_string(),
         "-word_size".to_string(),
-        "7".to_string(),
+        args.align_word_size.to_string(),
         "-xdrop_ungap".to_string(),
-        "400".to_string(),
+        args.align_xdrop_ungap.to_string(),
         "-xdrop_gap_final".to_string(),
-        "200".to_string(),
+        args.align_xdrop_final.to_string(),
         "-xdrop_gap".to_string(),
-        "100".to_string(),
+        args.align_xdrop_gap.to_string(),
         "-dust".to_string(),
-        "no".to_string(),
-        // TODO: verify remove
-        //"-complexity_adjust".to_string(),
+        if args.align_dust {
+            "yes".to_string()
+        } else {
+            "no".to_string()
+        },
     ];
+
+    if args.align_complexity_adjust {
+        rmblastn_args.push("-complexity_adjust".to_string());
+    }
 
     let rmblastn = match &args.aligner {
         Some(path) => PathBuf::from(path.to_string()),
         _ => which("rmblastn")?,
     };
+
     let mut cmd = Command::new(&rmblastn);
     if let Some(perl5lib) = &args.perl5lib {
         cmd.env("PERL5LIB", perl5lib);
     }
 
     if let Some(matrix) = &args.alignment_matrix {
-        let filename = matrix.file_name().unwrap_or_else(|| {
+        let matrix_filename = matrix.file_name().unwrap_or_else(|| {
             panic!("Failed to get filename from '{}'", matrix.display())
         });
 
-        let dirname = matrix.parent().unwrap_or_else(|| {
+        let matrix_dir = matrix.parent().unwrap_or_else(|| {
             panic!("Failed to get dirname from '{}'", matrix.display())
         });
 
-        cmd.env("BLASTMAT", dirname);
+        cmd.env("BLASTMAT", matrix_dir);
         rmblastn_args.extend_from_slice(&[
             "-matrix".to_string(),
-            filename.to_string_lossy().to_string(),
+            matrix_filename.to_string_lossy().to_string(),
         ]);
     }
 
@@ -719,12 +647,154 @@ fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
     }
 
     info!(
-        "Alignment finished in {}",
+        "Rmblastn finished in {}",
         format_seconds(start.elapsed().as_secs())
     );
 
-    Ok(alignment_outfile)
+    Ok(outfile)
 }
+
+// --------------------------------------------------
+fn bitscore_to_confidence(vals: &[&u32], lambda: f64) -> Result<Vec<f64>> {
+    dbg!(&vals);
+    dbg!(&lambda);
+    let converted: Vec<_> = vals.iter().map(|&&v| (v as f64 * lambda).exp2()).collect();
+    dbg!(&converted);
+    let total: f64 = converted.iter().sum();
+    dbg!(&total);
+    if total > 0. {
+        Ok(converted.into_iter().map(|v| v / total).collect())
+    } else {
+        bail!("Sum of converted values equals zero")
+    }
+}
+
+// --------------------------------------------------
+//fn align(args: &Args, all_seqs_path: &Path) -> Result<PathBuf> {
+//    let blast_suffixes: HashSet<_> = [
+//        "ndb", "nhr", "nin", "njs", "nog", "nos", "not", "nsq", "ntf", "nto",
+//    ]
+//    .iter()
+//    .map(OsStr::new)
+//    .collect();
+//
+//    let blast_db_dir = &args.consensi.parent().expect("blast db dir");
+//    let blast_files: Vec<_> = WalkDir::new(blast_db_dir)
+//        .max_depth(0)
+//        .into_iter()
+//        .filter_map(Result::ok)
+//        .filter(|e| {
+//            // Find files
+//            e.file_type().is_file()
+//                // With a nonzero size
+//                && e.metadata().unwrap().len() > 0
+//                // With a BLAST db suffix
+//                && blast_suffixes.contains(e.path().extension().unwrap())
+//        })
+//        .collect();
+//
+//    // See if we need to make the BLAST db
+//    if blast_files.len() < blast_suffixes.len() {
+//        info!("Making BLAST db");
+//        let mut makeblastdb_cmd = Command::new("makeblastdb");
+//        let makeblastdb_args = &[
+//            "-out".to_string(),
+//            args.consensi.to_string_lossy().to_string(),
+//            "-parse_seqids".to_string(),
+//            "-dbtype".to_string(),
+//            "nucl".to_string(),
+//            "-in".to_string(),
+//            args.consensi.to_string_lossy().to_string(),
+//        ];
+//
+//        debug!("Running 'makeblastdb {}'", &makeblastdb_args.join(" "));
+//        let res = makeblastdb_cmd.args(makeblastdb_args).output()?;
+//        if !res.status.success() {
+//            bail!(String::from_utf8(res.stderr)?);
+//        }
+//    }
+//
+//    let alignment_outfile = args.outdir.join("alignment.txt");
+//    let mut rmblastn_args = vec![
+//        "-num_alignments".to_string(),
+//        "9999999".to_string(),
+//        "-mask_level".to_string(),
+//        args.align_mask_level.to_string(),
+//        "-min_raw_gapped_score".to_string(),
+//        args.align_min_score.to_string(),
+//        "-num_threads".to_string(),
+//        args.num_threads.unwrap_or(num_cpus::get()).to_string(),
+//        "-db".to_string(),
+//        args.consensi.to_string_lossy().to_string(),
+//        "-query".to_string(),
+//        all_seqs_path.to_string_lossy().to_string(),
+//        "-out".to_string(),
+//        alignment_outfile.to_string_lossy().to_string(),
+//        "-outfmt".to_string(),
+//        "6 score qseqid sseqid".to_string(),
+//        // TODO: Verify these options
+//        "-gapopen".to_string(),
+//        "20".to_string(),
+//        "-gapextend".to_string(),
+//        "5".to_string(),
+//        "-word_size".to_string(),
+//        "7".to_string(),
+//        "-xdrop_ungap".to_string(),
+//        "400".to_string(),
+//        "-xdrop_gap_final".to_string(),
+//        "200".to_string(),
+//        "-xdrop_gap".to_string(),
+//        "100".to_string(),
+//        "-dust".to_string(),
+//        "no".to_string(),
+//        // TODO: verify remove
+//        //"-complexity_adjust".to_string(),
+//    ];
+//
+//    let rmblastn = match &args.aligner {
+//        Some(path) => PathBuf::from(path.to_string()),
+//        _ => which("rmblastn")?,
+//    };
+//    let mut cmd = Command::new(&rmblastn);
+//    if let Some(perl5lib) = &args.perl5lib {
+//        cmd.env("PERL5LIB", perl5lib);
+//    }
+//
+//    if let Some(matrix) = &args.alignment_matrix {
+//        let filename = matrix.file_name().unwrap_or_else(|| {
+//            panic!("Failed to get filename from '{}'", matrix.display())
+//        });
+//
+//        let dirname = matrix.parent().unwrap_or_else(|| {
+//            panic!("Failed to get dirname from '{}'", matrix.display())
+//        });
+//
+//        cmd.env("BLASTMAT", dirname);
+//        rmblastn_args.extend_from_slice(&[
+//            "-matrix".to_string(),
+//            filename.to_string_lossy().to_string(),
+//        ]);
+//    }
+//
+//    debug!(
+//        "Running '{} {}'",
+//        rmblastn.display(),
+//        rmblastn_args.join(" ")
+//    );
+//
+//    let start = Instant::now();
+//    let res = cmd.args(rmblastn_args).output()?;
+//    if !res.status.success() {
+//        bail!(String::from_utf8(res.stderr)?);
+//    }
+//
+//    info!(
+//        "Alignment finished in {}",
+//        format_seconds(start.elapsed().as_secs())
+//    );
+//
+//    Ok(alignment_outfile)
+//}
 
 // --------------------------------------------------
 fn call_winners(
@@ -757,8 +827,8 @@ fn call_winners(
 
     let mut clear_winners: HashMap<String, u32> = HashMap::new();
     let mut winning_sets: HashMap<StringPair, u32> = HashMap::new();
-    for (_target, bit_scores) in scores.iter() {
-        //debug!("\n>>> {target}");
+    for (target, bit_scores) in scores.iter() {
+        debug!("\n>>> {target} = {bit_scores:?}");
         let families: Vec<_> = bit_scores.keys().collect();
         let raw_scores: Vec<_> = bit_scores.values().collect();
         let conf: Vec<_> = bitscore_to_confidence(&raw_scores, lambda)?;
@@ -807,6 +877,7 @@ fn call_winners(
             .map(|(fam, _)| fam.to_string())
             .collect();
 
+        dbg!(&conf);
         if winners.len() == 1 {
             let winner = winners.first().unwrap();
             clear_winners
@@ -816,6 +887,7 @@ fn call_winners(
             //debug!("Clear Winner: {winner}");
         } else {
             let mut fam_comps: Vec<_> = conf.iter().zip(families).collect();
+            dbg!(&fam_comps);
             fam_comps.sort_by(|a, b| {
                 b.0.partial_cmp(a.0).unwrap().then_with(|| a.1.cmp(b.1))
             });
@@ -845,11 +917,25 @@ fn call_winners(
 }
 
 // --------------------------------------------------
-fn cat_sequences(inputs: &[PathBuf], outpath: &PathBuf) -> Result<()> {
+fn cat_sequences(
+    inputs: &[PathBuf],
+    families: &Vec<String>,
+    outpath: &PathBuf,
+) -> Result<()> {
     let mut output = open_for_write(outpath)?;
-    for filename in inputs.iter() {
-        let mut reader = parse_reader(open(filename)?)?;
-        let basename = Path::new(filename)
+    for file in inputs.iter() {
+        let family_name = file
+            .file_stem()
+            .expect("file_stem")
+            .to_string_lossy()
+            .to_string();
+
+        if !families.contains(&family_name) {
+            continue;
+        }
+
+        let mut reader = parse_reader(open(file)?)?;
+        let basename = Path::new(file)
             .file_stem()
             .unwrap()
             .to_string_lossy()
@@ -874,7 +960,7 @@ fn cat_sequences(inputs: &[PathBuf], outpath: &PathBuf) -> Result<()> {
 // --------------------------------------------------
 fn check_family_instances(
     consensi_file: &PathBuf,
-    instances_100: &[PathBuf],
+    instances_100_dir: &PathBuf,
 ) -> Result<HashMap<String, PathBuf>> {
     let mut reader = parse_reader(open(consensi_file)?)?;
     let mut consensi_names: HashMap<String, u32> = HashMap::new();
@@ -899,45 +985,47 @@ fn check_family_instances(
         );
     }
 
-    let consensi_names: HashSet<String> = consensi_names.keys().cloned().collect();
+    let mut consensi_names: Vec<String> = consensi_names.keys().cloned().collect();
+    consensi_names.sort();
 
     let mut family_to_path: HashMap<String, PathBuf> = HashMap::new();
-    for instance in instances_100 {
-        match instance.file_stem() {
-            Some(stem) => family_to_path
-                .insert(stem.to_string_lossy().to_string(), instance.clone()),
-            _ => bail!(
-                "Cannot get filename from {}",
-                instance.to_string_lossy().to_string()
-            ),
+    for entry in fs::read_dir(instances_100_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        match path.file_stem() {
+            Some(stem) => {
+                family_to_path.insert(stem.to_string_lossy().to_string(), path.clone())
+            }
+            _ => bail!("Cannot get filename from {}", path.display()),
         };
     }
 
     let instance_names: HashSet<String> = family_to_path.keys().cloned().collect();
 
-    let missing_instances: HashSet<_> =
-        consensi_names.difference(&instance_names).collect();
+    let missing_instances: Vec<_> = consensi_names
+        .into_iter()
+        .filter(|name| !instance_names.contains(name))
+        .collect();
 
     if !missing_instances.is_empty() {
-        let mut missing_instances: Vec<_> = missing_instances.iter().collect();
-        missing_instances.sort();
         bail!(
             "Missing the following instances: {}",
             missing_instances.iter().join(", ")
         );
     }
 
-    let missing_consensi: HashSet<_> =
-        instance_names.difference(&consensi_names).collect();
-
-    if !missing_consensi.is_empty() {
-        let mut missing_consensi: Vec<_> = missing_consensi.iter().collect();
-        missing_consensi.sort();
-        bail!(
-            "Missing the following consensi: {}",
-            missing_consensi.iter().join(", ")
-        );
-    }
+    // TODO: Necessary?
+    //let missing_consensi: HashSet<_> =
+    //    instance_names.difference(&consensi_names).collect();
+    //
+    //if !missing_consensi.is_empty() {
+    //    let mut missing_consensi: Vec<_> = missing_consensi.iter().collect();
+    //    missing_consensi.sort();
+    //    bail!(
+    //        "Missing the following consensi: {}",
+    //        missing_consensi.iter().join(", ")
+    //    );
+    //}
 
     Ok(family_to_path)
 }
@@ -1057,7 +1145,7 @@ fn extract_scores(
     for res in records {
         let res = res?;
         let rec: RmBlastOutput = res.deserialize(None)?;
-        match consensi_names.get(rec.query) {
+        match consensi_names.get(&rec.query) {
             Some(query_name) => {
                 // Note the families involved in the previous round's
                 // merges in order to skip them when adding the

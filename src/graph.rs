@@ -15,17 +15,17 @@ use crate::RmBlastOutput;
 ///
 /// The components are returned as `Vec<Vec<&str>>`, where each inner `Vec` contains the names of the
 /// sequences in the component.
-pub fn connected_components<'a>(records: &'a [RmBlastOutput]) -> Vec<Vec<&'a str>> {
-    let mut seq_to_id = HashMap::new();
-    let mut id_to_seq = HashMap::new();
+pub fn connected_components(records: Vec<RmBlastOutput>) -> Vec<Vec<String>> {
+    let mut seq_to_id: HashMap<String, usize> = HashMap::new();
+    let mut id_to_seq: HashMap<usize, String> = HashMap::new();
 
     let mut id_cnt = 0usize;
 
     records.iter().for_each(|record| {
-        for &s in &[record.query, record.target] {
-            seq_to_id.entry(s).or_insert_with(|| {
+        for s in &[&record.query, &record.target] {
+            seq_to_id.entry(s.to_string()).or_insert_with(|| {
                 let id = id_cnt;
-                id_to_seq.insert(id, s);
+                id_to_seq.insert(id, s.to_string());
                 id_cnt += 1;
                 id
             });
@@ -36,8 +36,8 @@ pub fn connected_components<'a>(records: &'a [RmBlastOutput]) -> Vec<Vec<&'a str
         .iter()
         .map(|r| {
             (
-                *seq_to_id.get(r.query).unwrap(),
-                *seq_to_id.get(r.target).unwrap(),
+                *seq_to_id.get(&r.query).unwrap(),
+                *seq_to_id.get(&r.target).unwrap(),
             )
         })
         .collect();
@@ -49,8 +49,8 @@ pub fn connected_components<'a>(records: &'a [RmBlastOutput]) -> Vec<Vec<&'a str
         .values()
         .map(|v| {
             v.iter()
-                .map(|id| *id_to_seq.get(id).unwrap())
-                .collect::<Vec<&str>>()
+                .flat_map(|id| id_to_seq.get(id).map(|v| v.to_string()))
+                .collect::<Vec<_>>()
         })
         .collect()
 }

@@ -30,5 +30,14 @@ alu:
 #--refiner /Users/kyclark/work/RepeatModeler/Refiner \
 #--aligner /Users/kyclark/work/RepeatModeler/util/align.pl \
 
+mixed:
+	cargo run -- \
+		--consensi  data/mixed/consensi.fa \
+		--instances data/mixed/instances/*.fa \
+		--log debug \
+		--outdir ./mixed-out \
+		--rmblast-dir /Users/kyclark/.local/bin \
+		--alignment-matrix $(MATRIX) 
+
 clean:
 	rm -rf RM_* makedb.log tests/inputs/consensi.fa.*
