@@ -23,6 +23,7 @@ pretty_assertions = "1.4.0"
 rand = "0.8.5"
 regex = "1.10.5"
 serde = { version = "1.0.204", features = ["derive"] }
+tabled = "0.17.0"
 tempfile = "3.10.1"
 walkdir = "2.5.0"
 which = "6.0.2"
