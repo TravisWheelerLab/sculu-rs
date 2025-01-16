@@ -2,7 +2,6 @@ MATRIX = /Users/kyclark/work/RepeatMasker/Matrices/ncbi/nt/25p41g.matrix
 
 run:
 	cargo run -- \
-		--force \
 		--outfile                test.fa \
 		--outdir                 out-test \
 		--consensi               tests/inputs/consensi.fa \

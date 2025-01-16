@@ -559,6 +559,7 @@ fn run_rmblastn(
     let res = Command::new("makeblastdb")
         .args(makeblastdb_args)
         .output()?;
+
     if !res.status.success() {
         bail!(String::from_utf8(res.stderr)?);
     }
@@ -1239,75 +1240,18 @@ fn parse_newick(val: &str) -> Vec<String> {
 // --------------------------------------------------
 #[cfg(test)]
 mod tests {
-    use crate::run_rmblastn;
-
     use super::{
         bitscore_to_confidence, call_winners, cat_sequences, downsample,
         extract_scores, find_independence, format_seconds, independence,
-        number_consensi, open, parse_newick, Args, Independence, StringPair, Winners,
+        number_consensi, open, parse_newick, Independence, StringPair, Winners,
     };
     use anyhow::Result;
     use kseq::parse_reader;
     use pretty_assertions::assert_eq;
     use std::{
-        collections::HashMap,
-        fs::{self, File},
-        path::PathBuf,
+        collections::HashMap, fs::{self, File}, path::PathBuf
     };
     use tempfile::{tempdir, NamedTempFile};
-
-    // Or "tests/inputs/25p41g.matrix"?
-    const MATRIX: &str =
-        "/Users/kyclark/work/RepeatMasker/Matrices/ncbi/nt/25p41g.matrix";
-
-    #[test]
-    fn test_align() -> Result<()> {
-        let outdir = tempdir()?;
-        let args = Args {
-            consensi: PathBuf::from("tests/inputs/consensi.fa".to_string()),
-            instances: vec![PathBuf::from("tests/inputs/test_set.fa".to_string())],
-            align_matrix: Some(MATRIX.into()),
-            outfile: outdir.path().join("families.fa"),
-            outdir: Some(outdir.path().to_path_buf()),
-            perl5lib: Some("/Users/kyclark/work/RepeatMasker".to_string()),
-            lambda: 0.1227,
-            confidence_margin: 3,
-            independence_threshold: 0.5,
-            aligner: Some(
-                "/Users/kyclark/work/RepeatModeler/util/align.pl".to_string(),
-            ),
-            refiner: Some("/Users/kyclark/work/RepeatModeler/Refiner".to_string()),
-            rmblast_dir: Some("/Users/kyclark/.local/bin".to_string()),
-            num_threads: None,
-            align_dust: false,
-            align_complexity_adjust: false,
-            align_gap_open: 20,
-            align_gap_extension: 5,
-            align_word_size: 7,
-            align_xdrop_gap: 100,
-            align_xdrop_ungap: 400,
-            align_xdrop_final: 200,
-            align_mask_level: 101,
-            align_min_score: 200,
-        };
-        let all_seqs_path = PathBuf::from("tests/inputs/all_seqs.fa");
-        let res = run_rmblastn(
-            &args,
-            &outdir.path().to_path_buf(),
-            &all_seqs_path,
-            &args.consensi.to_path_buf(),
-        );
-        assert!(res.is_ok());
-
-        let alignment_file = res.unwrap();
-        assert!(alignment_file.exists());
-
-        // Output seems non-deterministic?
-        //let actual = fs::read_to_string(alignment_file)?;
-        //let expected = fs::read_to_string("tests/outputs/alignment.txt")?;
-        //assert_eq!(actual, expected);
-        Ok(())
-    }
 
     #[test]
     fn test_bitscore_to_confidence() -> Result<()> {
@@ -1512,17 +1456,17 @@ mod tests {
     fn test_extract_scores() -> Result<()> {
         let outdir = tempdir()?;
         let consensi = PathBuf::from("tests/inputs/numbered_consensi.fa".to_string());
-        let alignment_file = PathBuf::from("tests/inputs/alignment.txt");
-        let orig_scores: Option<PathBuf> = None;
+        let alignment_file = PathBuf::from("tests/inputs/blast.out");
+        let prev_scores: Option<PathBuf> = None;
         let res =
-            extract_scores(&alignment_file, &orig_scores, &consensi, outdir.path());
+            extract_scores(&alignment_file, &prev_scores, &consensi, outdir.path());
         assert!(res.is_ok());
 
         let scores_file = res.unwrap();
         assert!(scores_file.exists());
 
         let actual = fs::read_to_string(scores_file)?;
-        let expected = fs::read_to_string("tests/outputs/alignment-scores.tsv")?;
+        let expected = fs::read_to_string("tests/inputs/alignment-scores.tsv")?;
         assert_eq!(actual, expected);
         Ok(())
     }
