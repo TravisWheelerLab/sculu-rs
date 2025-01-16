@@ -110,6 +110,7 @@ Note:
 
 * The `--outfile` argument is optional and defaults to _families.fa_. The program will halt if the outfile already exists and has a nonzero size.
 * The `--outdir` argument is optional and defaults to a hidden temporary directory that will be removed after the program runs. Specify an output directory if you wish to retain all the build artefacts include the _debug.log_ file with verbose output of the program's choices.
+* If you wish to watch the progress, use `tail -f <outdir>/debug.log`.
 
 ## Testing
 
