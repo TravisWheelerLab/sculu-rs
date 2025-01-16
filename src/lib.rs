@@ -52,10 +52,6 @@ pub struct Args {
     #[arg(long, value_name = "OUTDIR")]
     pub outdir: Option<PathBuf>,
 
-    /// Force overwrite of output files
-    #[arg(short, long)]
-    pub force: bool,
-
     /// Lambda value
     #[arg(long, value_name = "LAMBDA", default_value = "0.1227")]
     pub lambda: f64,
@@ -181,21 +177,12 @@ struct MergeFamilies<'a> {
     perl5lib: &'a Option<String>,
 }
 
-//#[derive(Debug, Tabled)]
-//struct FileStat {
-//    family_name: String,
-//    count: usize,
-//    longest: usize,
-//    average: usize,
-//}
-
 // --------------------------------------------------
 pub fn run(args: Args) -> Result<()> {
     // Final output file
-    if !args.force && (args.outfile.is_file() && args.outfile.metadata()?.len() > 0) {
+    if args.outfile.is_file() && args.outfile.metadata()?.len() > 0 {
         bail!(r#"--outfile "{}" exists"#, args.outfile.display())
     }
-
     let outfile = BufWriter::new(File::create(&args.outfile)?);
     let mut fasta_writer = FastaWriter::new(outfile);
 
@@ -204,14 +191,13 @@ pub fn run(args: Args) -> Result<()> {
         .outdir
         .clone()
         .unwrap_or(tempdir()?.path().to_path_buf());
-
     if !outdir.is_dir() {
         fs::create_dir_all(&outdir)?;
     }
 
+    // All logging goes into outdir
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Debug)
-        //.target(env_logger::Target::Stdout)
         .target(env_logger::Target::Pipe(Box::new(BufWriter::new(
             File::create(outdir.join("debug.log"))?,
         ))))
@@ -219,11 +205,18 @@ pub fn run(args: Args) -> Result<()> {
     debug!("args = {:#?}", &args);
 
     // Create a directory to hold sampled instances
+    // Copy the given instances to the working directory
+    //
+    // At first, I used all the instances directly
+    // Then we decided to try downsampling methods like
+    // taking the longest 100 or those longer than 50%
+    // of the consensi, but now we're back to using all
+    // and it's kind of silly to copy them like this.
+    //
+    // TODO: Go back to using the original Vec<PathBuf>?
     let instances_dir = &outdir.join("instances");
     debug!("Writing instances to '{}'", instances_dir.display());
     fs::create_dir_all(instances_dir)?;
-
-    // Copy the given instances to the working directory
     for file in &args.instances {
         fs::copy(
             file,
@@ -231,14 +224,7 @@ pub fn run(args: Args) -> Result<()> {
         )?;
     }
 
-    // Sample longest 100 instances
-    //let instances_sampled = sample_longest_100(&args, instances_dir)?;
-
-    // Take instances of length GTE half of consensus
-    //let instances_sampled = sample_instances(&args, instances_dir)?;
-    //debug!("instances_sampled = '{instances_sampled:#?}'");
-    //show_sampled_stats(instances_sample_dir)?;
-
+    // Align consensi to themselves to find groups/batches
     let mut components = align_consensi_to_self(&outdir, &args)?;
     components.sort_by_key(|v| v.len());
     debug!("After aligning consensi to self, components =\n{components:#?}");
@@ -327,24 +313,8 @@ fn run_batch<W: Write>(
         all_seqs_path.display()
     );
 
-    // How do we select the instances? Use all or a subset?
-    //
-    // Option 1: Use *all* the sequences
+    // Put the instances for the given families into a single file
     cat_sequences(&args.instances, &families, all_seqs_path)?;
-
-    // Option 2: Use the 100 longest
-    //let instances_100: Vec<_> = fs::read_dir(instances_100_dir)?
-    //    .map_while(Result::ok)
-    //    .map(|entry| entry.path())
-    //    .collect();
-    //cat_sequences(&instances_100, &families, all_seqs_path)?;
-
-    // Option 3: Use only those GTE in length to the consensus
-    //let instances_sampled: Vec<_> = fs::read_dir(instances_sample_dir)?
-    //    .map_while(Result::ok)
-    //    .map(|entry| entry.path())
-    //    .collect();
-    //cat_sequences(&instances_sampled, &families, all_seqs_path)?;
 
     // Create a starting directory for the merge iterations.
     let round0_dir = batch_dir.join("round000");
@@ -735,22 +705,9 @@ fn call_winners(
     let mut clear_winners: HashMap<String, u32> = HashMap::new();
     let mut winning_sets: HashMap<StringPair, u32> = HashMap::new();
     for (_target, bit_scores) in scores.iter() {
-        //debug!("\n>>> {target} = {bit_scores:?}");
         let families: Vec<_> = bit_scores.keys().collect();
         let raw_scores: Vec<_> = bit_scores.values().collect();
         let conf: Vec<_> = bitscore_to_confidence(&raw_scores, lambda)?;
-
-        //if print {
-        //    debug!("families   = {families:?}");
-        //    debug!("raw scores = {raw_scores:?}");
-        //    debug!(
-        //        "confidence = {:?}",
-        //        conf.iter()
-        //            .map(|v| format!("{:0.04}", v))
-        //            .collect::<Vec<_>>()
-        //    );
-        //}
-
         let pos: Vec<_> = (0..conf.len()).collect();
         let mut all_comps: Vec<bool> = vec![];
         for &i in &pos {
@@ -766,15 +723,6 @@ fn call_winners(
                 .map(|(x, y)| (x * (1. / confidence_margin as f64)) > *y)
                 .collect();
             all_comps.push(comps.iter().all(|&v| v));
-            //if print {
-            //    debug!(
-            //        "{:8} {:0.04} {:5} => {:?}",
-            //        families[i],
-            //        val,
-            //        comps.iter().all(|&v| v),
-            //        comps
-            //    );
-            //}
         }
 
         let winners: Vec<String> = families
@@ -790,7 +738,6 @@ fn call_winners(
                 .entry(winner.to_string())
                 .and_modify(|v| *v += 1)
                 .or_insert(1);
-            //debug!("Clear Winner: {winner}");
         } else {
             let mut fam_comps: Vec<_> = conf.iter().zip(families).collect();
             fam_comps.sort_by(|a, b| {
@@ -847,7 +794,6 @@ fn cat_sequences(
             .to_string();
 
         while let Some(rec) = reader.iter_record()? {
-            // TODO: Remove prefix of basename?
             writeln!(
                 output,
                 ">{}__{}{}\n{}",
@@ -893,7 +839,7 @@ fn check_family_instances(
 
     let mut consensi_names: Vec<String> = consensi_names.keys().cloned().collect();
     consensi_names.sort();
-    debug!("consensi_names {consensi_names:?}");
+    debug!("consensi_names {consensi_names:#?}");
 
     let mut family_to_path: HashMap<String, PathBuf> = HashMap::new();
     for entry in fs::read_dir(instances_dir)? {
@@ -906,16 +852,15 @@ fn check_family_instances(
             _ => bail!("Cannot get filename from {}", path.display()),
         };
     }
-    debug!("family_to_path {family_to_path:?}");
+    debug!("family_to_path {family_to_path:#?}");
 
     let instance_names: HashSet<String> = family_to_path.keys().cloned().collect();
-    debug!("instance_names {instance_names:?}");
+    debug!("instance_names {instance_names:#?}");
 
     let missing_instances: Vec<_> = consensi_names
         .into_iter()
         .filter(|name| !instance_names.contains(name))
         .collect();
-    debug!("missing_instances {missing_instances:?}");
 
     if !missing_instances.is_empty() {
         bail!(
@@ -934,7 +879,6 @@ fn downsample(
     upper_range: usize,
     mut output: impl Write,
 ) -> Result<usize> {
-    // Assumes FASTA file contains 100 longest sequences
     let mut reader = parse_reader(open(fasta)?)?;
     let mut rng = thread_rng();
     let range: Vec<usize> = (0..upper_range).collect();
@@ -1056,35 +1000,6 @@ fn find_independence(num_wins: u32, num_shared: u32) -> f64 {
         1.
     }
 }
-
-// --------------------------------------------------
-// Find the longest N number of sequences by grouping the sequences
-// by length and returning the shortest length that includes at least
-// the desired "number"
-//fn find_min_len(file: impl BufRead, number: usize) -> Result<usize> {
-//    let mut reader = parse_reader(file)?;
-//    let mut count_by_len: HashMap<usize, usize> = HashMap::new();
-//    while let Some(rec) = reader.iter_record()? {
-//        let len = rec.seq().len();
-//        count_by_len.entry(len).and_modify(|i| *i += 1).or_insert(1);
-//    }
-//
-//    let mut lengths: Vec<&usize> = count_by_len.keys().collect();
-//    lengths.sort();
-//    lengths.reverse();
-//
-//    let mut top_n = 0;
-//    let mut min_len = 0;
-//    for len in lengths {
-//        min_len = *len;
-//        top_n += count_by_len.get(len).unwrap_or(&0);
-//        if top_n >= number {
-//            break;
-//        }
-//    }
-//
-//    Ok(min_len)
-//}
 
 // --------------------------------------------------
 fn format_seconds(seconds: u64) -> String {
@@ -1322,121 +1237,6 @@ fn parse_newick(val: &str) -> Vec<String> {
 }
 
 // --------------------------------------------------
-// Sample the instances to take only those that have a length
-// GTE to half the length of their consensus sequence
-//fn sample_instances(args: &Args, outdir: &Path) -> Result<Vec<PathBuf>> {
-//    // Find lengths of consensi
-//    let mut consensus_length: HashMap<String, usize> = HashMap::new();
-//    {
-//        let mut reader = parse_reader(open(&args.consensi)?)?;
-//        while let Some(rec) = reader.iter_record()? {
-//            consensus_length.insert(rec.head().to_string(), rec.seq().len());
-//        }
-//    }
-//    debug!("Sampling instances based on consensus length:\n{consensus_length:?}");
-//
-//    let len = 200;
-//    let mut ret = vec![];
-//    for file in &args.instances {
-//        let family_name = file
-//            .file_stem()
-//            .expect("filestem")
-//            .to_string_lossy()
-//            .to_string();
-//        //let len = consensus_length
-//        //    .get(&family_name)
-//        //    .unwrap_or_else(|| panic!("Failed to get consensus len for {family_name}"))
-//        //    / 2;
-//        let outfile = outdir.join(file.file_name().unwrap());
-//        let mut output = open_for_write(&outfile)?;
-//        let mut reader = parse_reader(open(file)?)?;
-//        debug!("Family {family_name} take seqs >= {len}");
-//
-//        while let Some(rec) = reader.iter_record()? {
-//            if rec.seq().len() >= len {
-//                writeln!(output, ">{}{}\n{}", rec.head(), rec.des(), rec.seq())?;
-//            }
-//        }
-//
-//        ret.push(outfile);
-//    }
-//
-//    Ok(ret)
-//}
-
-// --------------------------------------------------
-//fn show_sampled_stats(instances_dir: &PathBuf) -> Result<()> {
-//    let mut stats = vec![];
-//    for entry in fs::read_dir(instances_dir)? {
-//        let instances = entry?;
-//        let family_name = instances
-//            .path()
-//            .file_stem()
-//            .expect("file_stem")
-//            .to_string_lossy()
-//            .to_string();
-//        let mut reader = parse_reader(open(&instances.path())?)?;
-//        let mut lengths = vec![];
-//        while let Some(rec) = reader.iter_record()? {
-//            lengths.push(rec.seq().len());
-//        }
-//        let count = lengths.len();
-//        let sum: usize = lengths.iter().sum();
-//        stats.push(FileStat {
-//            family_name: family_name.to_string(),
-//            count,
-//            longest: *lengths.iter().max().unwrap(),
-//            average: sum / count,
-//        })
-//    }
-//
-//    if !stats.is_empty() {
-//        let table = Table::new(stats);
-//        debug!("==> Sampled Instances Stats <==");
-//        debug!("{table}");
-//    }
-//
-//    Ok(())
-//}
-
-// --------------------------------------------------
-//fn sample_longest_100(args: &Args, outdir: &Path) -> Result<Vec<PathBuf>> {
-//    let limit = 100;
-//    debug!("Sampling longest 100 instances from each family");
-//
-//    let mut ret = vec![];
-//    for file in &args.instances {
-//        let family_name = file
-//            .file_stem()
-//            .expect("filestem")
-//            .to_string_lossy()
-//            .to_string();
-//        let min_length = find_min_len(open(file)?, 100)?;
-//        debug!("Family {family_name} take seqs >= {min_length}");
-//        let outfile = outdir.join(file.file_name().unwrap());
-//        let mut output = open_for_write(&outfile)?;
-//        let mut reader = parse_reader(open(file)?)?;
-//        let mut taken = 0;
-//
-//        while let Some(rec) = reader.iter_record()? {
-//            if taken == limit {
-//                break;
-//            }
-//
-//            let seq_len = rec.seq().len();
-//            if min_length > 0 && seq_len >= min_length {
-//                taken += 1;
-//                writeln!(output, ">{}{}\n{}", rec.head(), rec.des(), rec.seq())?;
-//            }
-//        }
-//
-//        ret.push(outfile);
-//    }
-//
-//    Ok(ret)
-//}
-
-// --------------------------------------------------
 #[cfg(test)]
 mod tests {
     use crate::run_rmblastn;
@@ -1452,7 +1252,6 @@ mod tests {
     use std::{
         collections::HashMap,
         fs::{self, File},
-        io::Cursor,
         path::PathBuf,
     };
     use tempfile::{tempdir, NamedTempFile};
@@ -1748,27 +1547,6 @@ mod tests {
         //                        wins  shared
         let res = find_independence(37, 46);
         assert_eq!(res, 0.4457831325301205);
-        Ok(())
-    }
-
-    #[test]
-    fn test_find_min_len() -> Result<()> {
-        let fasta = ">1\nAC\n>2\nA\n>3\nACG\n>4\nACGT\n>5\nACGTAA\n>6\nAC\n";
-
-        // Asking for more sequences (10) than present (6) returns the
-        // shortest sequence length (1)
-        let res = find_min_len(Cursor::new(fasta), 10);
-        assert!(res.is_ok());
-        assert_eq!(res.unwrap(), 1);
-
-        // Asking for one sequence finds the longest (6bp)
-        let res = find_min_len(Cursor::new(fasta), 1);
-        assert!(res.is_ok());
-        assert_eq!(res.unwrap(), 6);
-
-        let res = find_min_len(Cursor::new(fasta), 4);
-        assert!(res.is_ok());
-        assert_eq!(res.unwrap(), 2);
         Ok(())
     }
 
