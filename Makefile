@@ -1,4 +1,7 @@
-MATRIX = /Users/kyclark/work/RepeatMasker/Matrices/ncbi/nt/25p41g.matrix
+MATRIX = $(shell pwd)/tests/inputs/matrices/25p41g.matrix
+
+# --rmblast-dir            /Users/kyclark/.local/bin \
+# --rmblast-dir            /usr/local/bin \
 
 run:
 	cargo run -- \
@@ -8,7 +11,6 @@ run:
 		--instances              tests/inputs/instances/*.fa \
 		--independence-threshold .8 \
 		--confidence-margin      3 \
-		--rmblast-dir            /Users/kyclark/.local/bin \
 		--align-matrix $(MATRIX) 
 
 alu:
@@ -17,7 +19,6 @@ alu:
 		--instances    data/alu/subfams/*.fa \
 		--outfile      final-alu.fa \
 		--outdir       ./alu-out \
-		--rmblast-dir  /Users/kyclark/.local/bin \
 		--align-matrix $(MATRIX) 
 
 mixed:
@@ -27,7 +28,6 @@ mixed:
 		--outdir       ./mixed-out \
 		--consensi     data/mixed/consensi.fa \
 		--instances    data/mixed/instances/*.fa \
-		--rmblast-dir  /Users/kyclark/.local/bin \
 		--align-matrix $(MATRIX) 
 
 clean:

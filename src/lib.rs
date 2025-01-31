@@ -80,10 +80,6 @@ pub struct Args {
     #[arg(long, value_name = "PERL5LIB")]
     pub perl5lib: Option<String>,
 
-    /// Path to rmblastn
-    #[arg(long, value_name = "RMBLAST_DIR")]
-    pub rmblast_dir: Option<String>,
-
     /// Alignment matrix
     #[arg(long, value_name = "MATRIX")]
     pub align_matrix: Option<PathBuf>,
@@ -173,12 +169,17 @@ struct MergeFamilies<'a> {
     instances_dir: &'a PathBuf,
     num_threads: usize,
     refiner: &'a Option<String>,
-    rmblast_dir: &'a Option<String>,
     perl5lib: &'a Option<String>,
 }
 
 // --------------------------------------------------
 pub fn run(args: Args) -> Result<()> {
+    if let Some(path) = &args.align_matrix {
+        if !path.is_file() {
+            bail!("--align-matrix '{}' does not exist", path.display());
+        }
+    }
+
     // Final output file
     if args.outfile.is_file() && args.outfile.metadata()?.len() > 0 {
         bail!(r#"--outfile "{}" exists"#, args.outfile.display())
@@ -433,7 +434,6 @@ fn run_batch<W: Write>(
                     instances_dir,
                     num_threads: args.num_threads.unwrap_or(num_cpus::get()),
                     refiner: &args.refiner,
-                    rmblast_dir: &args.rmblast_dir,
                     perl5lib: &args.perl5lib,
                 },
                 &mut family_to_path,
@@ -556,9 +556,8 @@ fn run_rmblastn(
     ];
 
     debug!("Running 'makeblastdb {}'", &makeblastdb_args.join(" "));
-    let res = Command::new("makeblastdb")
-        .args(makeblastdb_args)
-        .output()?;
+    let makeblastdb = which("makeblastdb")?;
+    let res = Command::new(makeblastdb).args(makeblastdb_args).output()?;
 
     if !res.status.success() {
         bail!(String::from_utf8(res.stderr)?);
@@ -1135,9 +1134,14 @@ fn merge_families(
         args.num_threads.to_string(),
     ];
 
-    if let Some(rmblast_dir) = &args.rmblast_dir {
-        refiner_args
-            .extend_from_slice(&["--rmblast_dir".to_string(), rmblast_dir.to_string()]);
+    if let Ok(rmblast) = which("rmblastn") {
+        if let Some(rmblast_dir) = rmblast
+            .as_path()
+            .parent()
+            .map(|path| path.to_string_lossy().to_string())
+        {
+            refiner_args.extend_from_slice(&["--rmblast_dir".to_string(), rmblast_dir]);
+        }
     }
 
     refiner_args.push(msa_input.to_string_lossy().to_string());
@@ -1249,7 +1253,9 @@ mod tests {
     use kseq::parse_reader;
     use pretty_assertions::assert_eq;
     use std::{
-        collections::HashMap, fs::{self, File}, path::PathBuf
+        collections::HashMap,
+        fs::{self, File},
+        path::PathBuf,
     };
     use tempfile::{tempdir, NamedTempFile};
 
