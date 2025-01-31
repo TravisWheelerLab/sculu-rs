@@ -1,8 +1,5 @@
 MATRIX = $(shell pwd)/tests/inputs/matrices/25p41g.matrix
 
-# --rmblast-dir            /Users/kyclark/.local/bin \
-# --rmblast-dir            /usr/local/bin \
-
 run:
 	cargo run -- \
 		--outfile                test.fa \
@@ -11,7 +8,7 @@ run:
 		--instances              tests/inputs/instances/*.fa \
 		--independence-threshold .8 \
 		--confidence-margin      3 \
-		--align-matrix $(MATRIX) 
+		--align-matrix           $(MATRIX) 
 
 alu:
 	cargo run -- \

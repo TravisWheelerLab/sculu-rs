@@ -556,7 +556,7 @@ fn run_rmblastn(
     ];
 
     debug!("Running 'makeblastdb {}'", &makeblastdb_args.join(" "));
-    let makeblastdb = which("makeblastdb")?;
+    let makeblastdb = which("makeblastdb").map_err(|e| anyhow!("makeblastdb: {e}"))?;
     let res = Command::new(makeblastdb).args(makeblastdb_args).output()?;
 
     if !res.status.success() {
@@ -607,7 +607,7 @@ fn run_rmblastn(
 
     let rmblastn = match &args.aligner {
         Some(path) => PathBuf::from(path.to_string()),
-        _ => which("rmblastn")?,
+        _ => which("rmblastn").map_err(|e| anyhow!("rmblastn: {e}"))?,
     };
 
     let mut cmd = Command::new(&rmblastn);
@@ -1125,7 +1125,7 @@ fn merge_families(
 
     let refiner = match &args.refiner {
         Some(path) => PathBuf::from(path.to_string()),
-        _ => which("Refiner")?,
+        _ => which("Refiner").map_err(|e| anyhow!("Refiner: {e}"))?,
     };
 
     let mut refiner_args = vec![
@@ -1134,14 +1134,13 @@ fn merge_families(
         args.num_threads.to_string(),
     ];
 
-    if let Ok(rmblast) = which("rmblastn") {
-        if let Some(rmblast_dir) = rmblast
-            .as_path()
-            .parent()
-            .map(|path| path.to_string_lossy().to_string())
-        {
-            refiner_args.extend_from_slice(&["--rmblast_dir".to_string(), rmblast_dir]);
-        }
+    let rmblast = which("rmblastn").map_err(|e| anyhow!("rmblastn: {e}"))?;
+    if let Some(rmblast_dir) = rmblast
+        .as_path()
+        .parent()
+        .map(|path| path.to_string_lossy().to_string())
+    {
+        refiner_args.extend_from_slice(&["--rmblast_dir".to_string(), rmblast_dir]);
     }
 
     refiner_args.push(msa_input.to_string_lossy().to_string());
