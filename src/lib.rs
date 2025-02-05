@@ -1,7 +1,6 @@
 mod graph;
 
 use anyhow::{anyhow, bail, Result};
-use assert_cmd::Command;
 use chrono::Duration;
 use clap::Parser;
 use csv::{ReaderBuilder, WriterBuilder};
@@ -15,7 +14,7 @@ use noodles_fasta::{
     io::Writer as FastaWriter,
     record::{Definition as FastaDefinition, Record as FastaRecord},
 };
-use rand::{seq::SliceRandom, thread_rng};
+use rand::{self, prelude::IndexedRandom, seq::SliceRandom};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -27,50 +26,18 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
-use tempfile::tempdir;
-//use tabled::{Table, Tabled};
-//use walkdir::WalkDir;
 use which::which;
 
 /// SCULU subfamily clustering tool
-#[derive(Debug, Parser, Clone)]
-#[command(author, version, about)]
-pub struct Args {
-    /// FASTA file of subfamily consensi
-    #[arg(short, long, value_name = "CONSENSI")]
-    pub consensi: PathBuf,
-
-    /// Instance files for each subfamily
-    #[arg(short, long, value_name = "INSTANCES", required = true, num_args=1..)]
-    pub instances: Vec<PathBuf>,
-
-    /// Output file
-    #[arg(short, long, value_name = "OUTFILE", default_value = "families.fa")]
-    pub outfile: PathBuf,
+#[derive(Debug, Parser)]
+#[command(version, about)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
 
     /// Output directory (if you want working files preserved)
     #[arg(long, value_name = "OUTDIR")]
     pub outdir: Option<PathBuf>,
-
-    /// Lambda value
-    #[arg(long, value_name = "LAMBDA", default_value = "0.1227")]
-    pub lambda: f64,
-
-    /// Independence threshold
-    #[arg(long, value_name = "IND", default_value = "0.5")]
-    pub independence_threshold: f64,
-
-    /// Confidence margin
-    #[arg(long, value_name = "CONF", default_value = "3")]
-    pub confidence_margin: isize,
-
-    /// Path to rmblastn
-    #[arg(long, value_name = "ALIGNER")]
-    pub aligner: Option<String>,
-
-    /// Path to RepeatModeler/Refiner
-    #[arg(long, value_name = "REFINER")]
-    pub refiner: Option<String>,
 
     /// Number of threads for rmblastn/Refiner
     #[arg(long, value_name = "THREADS")]
@@ -79,6 +46,10 @@ pub struct Args {
     /// PERL5LIB, e.g., to find RepeatMasker/RepeatModeler
     #[arg(long, value_name = "PERL5LIB")]
     pub perl5lib: Option<String>,
+
+    /// Path to rmblastn
+    #[arg(long, value_name = "ALIGNER")]
+    pub aligner: Option<String>,
 
     /// Alignment matrix
     #[arg(long, value_name = "MATRIX")]
@@ -125,6 +96,59 @@ pub struct Args {
     pub align_min_score: i64,
 }
 
+#[derive(Parser, Debug)]
+pub enum Command {
+    /// Cluster families
+    Cluster(ClusterArgs),
+
+    /// Merge families
+    Merge(MergeArgs),
+}
+
+#[derive(Debug, Parser, Clone)]
+#[command(about)]
+pub struct ClusterArgs {
+    /// FASTA file of subfamily consensi
+    #[arg(value_name = "CONSENSI")]
+    pub consensi: PathBuf,
+}
+
+#[derive(Debug, Parser, Clone)]
+#[command(about)]
+pub struct MergeArgs {
+    /// Components file from "cluster" action
+    #[arg(long, value_name = "COMPONENTS", required = true)]
+    pub components: PathBuf,
+
+    /// FASTA file of subfamily consensi
+    #[arg(long, value_name = "CONSENSI", required = true)]
+    pub consensi: PathBuf,
+
+    /// Directory of instance files for each subfamily
+    #[arg(long, value_name = "INSTANCES", required = true)]
+    pub instances: PathBuf,
+
+    /// Output file
+    #[arg(long, value_name = "OUTFILE", default_value = "families.fa")]
+    pub outfile: PathBuf,
+
+    /// Lambda value
+    #[arg(long, value_name = "LAMBDA", default_value = "0.1227")]
+    pub lambda: f64,
+
+    /// Independence threshold
+    #[arg(long, value_name = "IND", default_value = "0.5")]
+    pub independence_threshold: f64,
+
+    /// Confidence margin
+    #[arg(long, value_name = "CONF", default_value = "3")]
+    pub confidence_margin: isize,
+
+    /// Path to RepeatModeler/Refiner
+    #[arg(long, value_name = "REFINER")]
+    pub refiner: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 struct RmBlastOutput {
     score: u32,
@@ -144,6 +168,11 @@ struct Independence {
     f1: String,
     f2: String,
     val: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Components {
+    components: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Eq, PartialEq, Hash)]
@@ -173,76 +202,70 @@ struct MergeFamilies<'a> {
 }
 
 // --------------------------------------------------
-pub fn run(args: Args) -> Result<()> {
-    if let Some(path) = &args.align_matrix {
+// Align the consensi to itself to identify clusters
+// [
+//     [ "Charlie13a" ],
+//     [ "Tigger3c" ],
+//     [ "AluSc", "AluYm1", "AluYh3", "AluYh9", "AluYb8", "AluYb9" ],
+//     [ "Charlie1a", "Charlie1", "Charlie2a", "Charlie2b" ],
+// ]
+pub fn cluster(
+    outdir: &PathBuf,
+    cli_args: &Cli,
+    cluster_args: ClusterArgs,
+) -> Result<()> {
+    let blast_dir = outdir.join("consensi_cluster");
+    let output = run_rmblastn(
+        &blast_dir,
+        &cli_args,
+        &cluster_args.consensi,
+        &cluster_args.consensi,
+    )?;
+    let components = graph::connected_components(parse_alignment(&output)?);
+    debug!("After aligning consensi to self, components =\n{components:#?}");
+    let path = outdir.join("components.json");
+    let mut file = File::create(&path)?;
+    write!(file, "{}", serde_json::to_string_pretty(&components)?)?;
+    println!("Wrote components to '{}'", path.display());
+
+    Ok(())
+}
+
+// --------------------------------------------------
+pub fn merge(outdir: &PathBuf, cli_args: &Cli, merge_args: MergeArgs) -> Result<()> {
+    if let Some(path) = &cli_args.align_matrix {
         if !path.is_file() {
             bail!("--align-matrix '{}' does not exist", path.display());
         }
     }
 
     // Final output file
-    if args.outfile.is_file() && args.outfile.metadata()?.len() > 0 {
-        bail!(r#"--outfile "{}" exists"#, args.outfile.display())
+    if merge_args.outfile.is_file() && merge_args.outfile.metadata()?.len() > 0 {
+        bail!(r#"--outfile "{}" exists"#, merge_args.outfile.display())
     }
-    let outfile = BufWriter::new(File::create(&args.outfile)?);
+    let outfile = BufWriter::new(File::create(&merge_args.outfile)?);
     let mut fasta_writer = FastaWriter::new(outfile);
 
-    // Use a tempdir if no named outdir
-    let outdir = args
-        .outdir
-        .clone()
-        .unwrap_or(tempdir()?.path().to_path_buf());
-    if !outdir.is_dir() {
-        fs::create_dir_all(&outdir)?;
-    }
+    debug!("cli_args = {:#?}", &cli_args);
+    debug!("merge_args = {:#?}", &merge_args);
 
-    // All logging goes into outdir
-    env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Debug)
-        .target(env_logger::Target::Pipe(Box::new(BufWriter::new(
-            File::create(outdir.join("debug.log"))?,
-        ))))
-        .init();
-    debug!("args = {:#?}", &args);
-
-    // Create a directory to hold sampled instances
-    // Copy the given instances to the working directory
-    //
-    // At first, I used all the instances directly
-    // Then we decided to try downsampling methods like
-    // taking the longest 100 or those longer than 50%
-    // of the consensi, but now we're back to using all
-    // and it's kind of silly to copy them like this.
-    //
-    // TODO: Go back to using the original Vec<PathBuf>?
-    let instances_dir = &outdir.join("instances");
-    debug!("Writing instances to '{}'", instances_dir.display());
-    fs::create_dir_all(instances_dir)?;
-    for file in &args.instances {
-        fs::copy(
-            file,
-            instances_dir.join(file.file_name().expect("filename")),
-        )?;
-    }
-
-    // Align consensi to themselves to find groups/batches
-    let mut components = align_consensi_to_self(&outdir, &args)?;
-    components.sort_by_key(|v| v.len());
-    debug!("After aligning consensi to self, components =\n{components:#?}");
+    let json = fs::read_to_string(&merge_args.components)?;
+    let components: Components = serde_json::from_str(&json)?;
+    debug!("components = {components:?}");
 
     let mut batch_num = 0;
-    for families in components {
+    for families in components.components {
         if families.len() == 1 {
             debug!("Extracting independent family '{}'", families[0]);
-            copy_fasta(&families, &args.consensi, &mut fasta_writer)?
+            copy_fasta(&families, &merge_args.consensi, &mut fasta_writer)?
         } else {
             batch_num += 1;
             run_batch(
-                &outdir,
+                outdir,
                 batch_num,
                 families,
-                args.clone(),
-                instances_dir,
+                cli_args,
+                merge_args.clone(),
                 &mut fasta_writer,
             )?
         }
@@ -250,7 +273,7 @@ pub fn run(args: Args) -> Result<()> {
 
     println!(
         r#"Done, see final families in "{}""#,
-        args.outfile.display()
+        merge_args.outfile.display()
     );
     Ok(())
 }
@@ -279,8 +302,8 @@ fn run_batch<W: Write>(
     outdir: &Path,
     batch_num: usize,
     families: Vec<String>,
-    args: Args,
-    instances_dir: &PathBuf,
+    cli_args: &Cli,
+    merge_args: MergeArgs,
     final_writer: &mut FastaWriter<W>,
 ) -> Result<()> {
     debug!(
@@ -297,14 +320,14 @@ fn run_batch<W: Write>(
         // Scoped to cause fasta_writer to close
         let outfile = BufWriter::new(File::create(&consensi)?);
         let mut fasta_writer = FastaWriter::new(outfile);
-        copy_fasta(&families, &args.consensi, &mut fasta_writer)?;
+        copy_fasta(&families, &merge_args.consensi, &mut fasta_writer)?;
     }
 
     // Check that the "consensi" sequences have clear relationships
     // to "instance" files. Returns a mutable hashmap from the
     // family names to their instance files for merges.
     debug!("Checking family names/instances");
-    let mut family_to_path = check_family_instances(&consensi, instances_dir)?;
+    let mut family_to_path = check_family_instances(&consensi, &merge_args.instances)?;
     debug!("family_to_path = '{family_to_path:#?}'");
 
     // Create query file for families
@@ -315,7 +338,7 @@ fn run_batch<W: Write>(
     );
 
     // Put the instances for the given families into a single file
-    cat_sequences(&args.instances, &families, all_seqs_path)?;
+    cat_sequences(&merge_args.instances, &families, all_seqs_path)?;
 
     // Create a starting directory for the merge iterations.
     let round0_dir = batch_dir.join("round000");
@@ -342,7 +365,8 @@ fn run_batch<W: Write>(
         // Align all the sequences to the current consensi.
         // On the first round, all the original consensi will be included.
         // On future rounds, only the newly merged consensi will be present.
-        let alignment_file = run_rmblastn(&args, &round_dir, &consensi, all_seqs_path)?;
+        let alignment_file =
+            run_rmblastn(&round_dir, &cli_args, &consensi, all_seqs_path)?;
 
         // Extract the scores from the alignment file.
         // On the first round, there will be no "prev_scores" file.
@@ -355,7 +379,11 @@ fn run_batch<W: Write>(
         prev_scores = Some(scores_file.clone());
 
         // Find the clear/ambiguous winners from the scores
-        let winners = call_winners(&scores_file, args.lambda, args.confidence_margin)?;
+        let winners = call_winners(
+            &scores_file,
+            merge_args.lambda,
+            merge_args.confidence_margin,
+        )?;
 
         // Determine independence of all pairs
         let pair_independence = independence(winners);
@@ -372,7 +400,7 @@ fn run_batch<W: Write>(
         // Select only those pair lacking independence
         let non_independent: Vec<_> = pair_independence
             .iter()
-            .filter(|v| v.val < args.independence_threshold)
+            .filter(|v| v.val < merge_args.independence_threshold)
             .collect();
 
         debug!("{} family pair not independent.", non_independent.len());
@@ -431,10 +459,10 @@ fn run_batch<W: Write>(
                     family1: pair.f1.clone(),
                     family2: pair.f2.clone(),
                     outdir: msa_dir.to_path_buf(),
-                    instances_dir,
-                    num_threads: args.num_threads.unwrap_or(num_cpus::get()),
-                    refiner: &args.refiner,
-                    perl5lib: &args.perl5lib,
+                    instances_dir: &merge_args.instances,
+                    num_threads: cli_args.num_threads.unwrap_or(num_cpus::get()),
+                    refiner: &merge_args.refiner,
+                    perl5lib: &cli_args.perl5lib,
                 },
                 &mut family_to_path,
             )?;
@@ -505,20 +533,6 @@ fn run_batch<W: Write>(
 }
 
 // --------------------------------------------------
-// Align the consensi to itself to identify clusters
-// [
-//     [ "Charlie13a" ],
-//     [ "Tigger3c" ],
-//     [ "AluSc", "AluYm1", "AluYh3", "AluYh9", "AluYb8", "AluYb9" ],
-//     [ "Charlie1a", "Charlie1", "Charlie2a", "Charlie2b" ],
-// ]
-fn align_consensi_to_self(outdir: &Path, args: &Args) -> Result<Vec<Vec<String>>> {
-    let outdir = outdir.join("consensi_cluster");
-    let output = run_rmblastn(args, &outdir, &args.consensi, &args.consensi)?;
-    Ok(graph::connected_components(parse_alignment(&output)?))
-}
-
-// --------------------------------------------------
 fn parse_alignment(blast_out: &PathBuf) -> Result<Vec<RmBlastOutput>> {
     // BLAST output fails to include headers
     let mut reader = ReaderBuilder::new()
@@ -538,8 +552,8 @@ fn parse_alignment(blast_out: &PathBuf) -> Result<Vec<RmBlastOutput>> {
 
 // --------------------------------------------------
 fn run_rmblastn(
-    args: &Args,
     outdir: &PathBuf,
+    cli_args: &Cli,
     db: &Path,
     query: &Path,
 ) -> Result<PathBuf> {
@@ -557,7 +571,9 @@ fn run_rmblastn(
 
     debug!("Running 'makeblastdb {}'", &makeblastdb_args.join(" "));
     let makeblastdb = which("makeblastdb").map_err(|e| anyhow!("makeblastdb: {e}"))?;
-    let res = Command::new(makeblastdb).args(makeblastdb_args).output()?;
+    let res = std::process::Command::new(makeblastdb)
+        .args(makeblastdb_args)
+        .output()?;
 
     if !res.status.success() {
         bail!(String::from_utf8(res.stderr)?);
@@ -574,48 +590,48 @@ fn run_rmblastn(
         "-outfmt".to_string(),
         "6 score qseqid sseqid".to_string(),
         "-num_threads".to_string(),
-        args.num_threads.unwrap_or(num_cpus::get()).to_string(),
+        cli_args.num_threads.unwrap_or(num_cpus::get()).to_string(),
         "-num_alignments".to_string(),
         "9999999".to_string(),
         "-mask_level".to_string(),
-        args.align_mask_level.to_string(),
+        cli_args.align_mask_level.to_string(),
         "-min_raw_gapped_score".to_string(),
-        args.align_min_score.to_string(),
+        cli_args.align_min_score.to_string(),
         "-gapopen".to_string(),
-        args.align_gap_open.to_string(),
+        cli_args.align_gap_open.to_string(),
         "-gapextend".to_string(),
-        args.align_gap_extension.to_string(),
+        cli_args.align_gap_extension.to_string(),
         "-word_size".to_string(),
-        args.align_word_size.to_string(),
+        cli_args.align_word_size.to_string(),
         "-xdrop_ungap".to_string(),
-        args.align_xdrop_ungap.to_string(),
+        cli_args.align_xdrop_ungap.to_string(),
         "-xdrop_gap_final".to_string(),
-        args.align_xdrop_final.to_string(),
+        cli_args.align_xdrop_final.to_string(),
         "-xdrop_gap".to_string(),
-        args.align_xdrop_gap.to_string(),
+        cli_args.align_xdrop_gap.to_string(),
         "-dust".to_string(),
-        if args.align_dust {
+        if cli_args.align_dust {
             "yes".to_string()
         } else {
             "no".to_string()
         },
     ];
 
-    if args.align_complexity_adjust {
+    if cli_args.align_complexity_adjust {
         rmblastn_args.push("-complexity_adjust".to_string());
     }
 
-    let rmblastn = match &args.aligner {
+    let rmblastn = match &cli_args.aligner {
         Some(path) => PathBuf::from(path.to_string()),
         _ => which("rmblastn").map_err(|e| anyhow!("rmblastn: {e}"))?,
     };
 
-    let mut cmd = Command::new(&rmblastn);
-    if let Some(perl5lib) = &args.perl5lib {
+    let mut cmd = std::process::Command::new(&rmblastn);
+    if let Some(perl5lib) = &cli_args.perl5lib {
         cmd.env("PERL5LIB", perl5lib);
     }
 
-    if let Some(matrix) = &args.align_matrix {
+    if let Some(matrix) = &cli_args.align_matrix {
         let matrix_filename = matrix.file_name().unwrap_or_else(|| {
             panic!("Failed to get filename from '{}'", matrix.display())
         });
@@ -770,13 +786,15 @@ fn call_winners(
 
 // --------------------------------------------------
 fn cat_sequences(
-    inputs: &[PathBuf],
+    instances_dir: &PathBuf,
     families: &[String],
     outpath: &PathBuf,
 ) -> Result<()> {
     let mut output = open_for_write(outpath)?;
-    for file in inputs.iter() {
+    for entry in fs::read_dir(instances_dir)? {
+        let file = entry?;
         let family_name = file
+            .path()
             .file_stem()
             .expect("file_stem")
             .to_string_lossy()
@@ -786,18 +804,18 @@ fn cat_sequences(
             continue;
         }
 
-        let mut reader = parse_reader(open(file)?)?;
-        let basename = Path::new(file)
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let mut reader = parse_reader(open(&file.path())?)?;
+        //let basename = Path::new(&file)
+        //    .file_stem()
+        //    .unwrap()
+        //    .to_string_lossy()
+        //    .to_string();
 
         while let Some(rec) = reader.iter_record()? {
             writeln!(
                 output,
                 ">{}__{}{}\n{}",
-                basename,
+                family_name,
                 rec.head(),
                 rec.des(),
                 rec.seq()
@@ -880,7 +898,7 @@ fn downsample(
     mut output: impl Write,
 ) -> Result<usize> {
     let mut reader = parse_reader(open(fasta)?)?;
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
     let range: Vec<usize> = (0..upper_range).collect();
     let mut take: Vec<usize> = range
         .choose_multiple(&mut rng, num_wanted)
@@ -1151,7 +1169,7 @@ fn merge_families(
     );
 
     let start = Instant::now();
-    let mut cmd = Command::new(&refiner);
+    let mut cmd = std::process::Command::new(&refiner);
     if let Some(perl5lib) = &args.perl5lib {
         cmd.env("PERL5LIB", perl5lib);
     }
@@ -1326,18 +1344,12 @@ mod tests {
 
     #[test]
     fn test_cat_sequences() -> Result<()> {
-        let inputs = vec![
-            PathBuf::from("tests/inputs/instances_100/AluY.fa"),
-            PathBuf::from("tests/inputs/instances_100/AluYa5.fa"),
-            PathBuf::from("tests/inputs/instances_100/AluYb8.fa"),
-            PathBuf::from("tests/inputs/instances_100/AluYb9.fa"),
-            PathBuf::from("tests/inputs/instances_100/AluYm1.fa"),
-        ];
+        let instances_dir = PathBuf::from("tests/inputs/instances_100");
         let outdir = tempdir()?;
 
         let outpath = outdir.path().join("all_seqs.fa");
         let res = cat_sequences(
-            &inputs,
+            &instances_dir,
             &[
                 "AluY".to_string(),
                 "AluYa5".to_string(),

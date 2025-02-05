@@ -1,5 +1,21 @@
 MATRIX = $(shell pwd)/tests/inputs/matrices/25p41g.matrix
 
+cluster:
+	cargo run -- --outdir out-test --align-matrix $(MATRIX) \
+		cluster tests/inputs/consensi.fa
+
+mixclust:
+	cargo run -- --outdir out-mixed --align-matrix $(MATRIX) \
+		cluster data/mixed/consensi.fa
+
+mixmerge:
+	cargo run -- --outdir out-mixed --align-matrix $(MATRIX) \
+		merge \
+		--components   out-mixed/components.json \
+		--consensi     data/mixed/consensi.fa \
+		--instances    data/mixed/instances \
+		--outfile      final-mixed.fa 
+
 run:
 	cargo run -- \
 		--outfile                test.fa \
@@ -18,14 +34,6 @@ alu:
 		--outdir       ./alu-out \
 		--align-matrix $(MATRIX) 
 
-mixed:
-	cargo run -- \
-		--force \
-		--outfile      final-mixed.fa \
-		--outdir       ./mixed-out \
-		--consensi     data/mixed/consensi.fa \
-		--instances    data/mixed/instances/*.fa \
-		--align-matrix $(MATRIX) 
 
 clean:
 	rm -rf RM_* makedb.log tests/inputs/consensi.fa.*

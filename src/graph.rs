@@ -8,14 +8,15 @@ use petgraph::{
     },
 };
 
-use crate::RmBlastOutput;
+use crate::{Components, RmBlastOutput};
 
-/// Given a slice of `RmBlastOutput` records, get the connected components of a graph where edges
-/// are created between sequences that have been aligned.
+// --------------------------------------------------
+/// Given a slice of `RmBlastOutput` records, get the connected components 
+/// of a graph where edges are created between sequences that have been aligned.
 ///
-/// The components are returned as `Vec<Vec<&str>>`, where each inner `Vec` contains the names of the
-/// sequences in the component.
-pub fn connected_components(records: Vec<RmBlastOutput>) -> Vec<Vec<String>> {
+/// The components are returned as `Vec<Vec<&str>>`, where each inner `Vec` 
+/// contains the names of the sequences in the component.
+pub fn connected_components(records: Vec<RmBlastOutput>) -> Components {
     let mut seq_to_id: HashMap<String, usize> = HashMap::new();
     let mut id_to_seq: HashMap<usize, String> = HashMap::new();
 
@@ -43,18 +44,21 @@ pub fn connected_components(records: Vec<RmBlastOutput>) -> Vec<Vec<String>> {
         .collect();
 
     let graph = UnGraph::<(), (), usize>::from_edges(edges);
-    let components = _connected_components(&graph);
-
-    components
+    let hash = _connected_components(&graph);
+    let mut components: Vec<Vec<String>> = hash
         .values()
         .map(|v| {
             v.iter()
                 .flat_map(|id| id_to_seq.get(id).map(|v| v.to_string()))
                 .collect::<Vec<_>>()
         })
-        .collect()
+        .collect();
+    components.sort_by_key(|v| v.len());
+
+    Components { components }
 }
 
+// --------------------------------------------------
 fn _connected_components<G>(graph: G) -> HashMap<usize, Vec<usize>>
 where
     G: NodeCompactIndexable + IntoEdgeReferences + IntoNodeReferences,

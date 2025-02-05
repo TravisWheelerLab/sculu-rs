@@ -6,6 +6,13 @@ use tempfile::tempdir;
 const PRG: &str = "sculu";
 const MATRIX: &str = "tests/inputs/matrices/25p41g.matrix";
 
+struct RunArgs<'a> {
+    consensi: &'a str,
+    instances: &'a str,
+    independence: &'a str,
+    confidence: &'a str,
+}
+
 // --------------------------------------------------
 #[test]
 fn usage() -> Result<()> {
@@ -21,36 +28,37 @@ fn usage() -> Result<()> {
 // --------------------------------------------------
 #[test]
 fn run1() -> Result<()> {
-    let args = vec![
-        "--consensi".to_string(),
-        "tests/inputs/consensi.fa".to_string(),
-        "--instances".to_string(),
-        "tests/inputs/instances/AluY.fa".to_string(),
-        "tests/inputs/instances/AluYa5.fa".to_string(),
-        "tests/inputs/instances/AluYb8.fa".to_string(),
-        "tests/inputs/instances/AluYb9.fa".to_string(),
-        "tests/inputs/instances/AluYm1.fa".to_string(),
-        "--independence-threshold".to_string(),
-        ".8".to_string(),
-        "--confidence-margin".to_string(),
-        "3".to_string(),
-        "--align-matrix".to_string(),
-        MATRIX.to_string(),
-    ];
-    run(args)
+    run(RunArgs {
+        consensi: "tests/inputs/consensi.fa",
+        instances: "tests/inputs/instances",
+        independence: ".8",
+        confidence: "3",
+    })
 }
 
 // --------------------------------------------------
-fn run(mut args: Vec<String>) -> Result<()> {
+fn run(args: RunArgs) -> Result<()> {
     let outdir = tempdir()?;
+    let outdir_name = outdir.path().to_string_lossy();
     let outfile = outdir.path().join("final.fa");
+    let outname = outfile.to_string_lossy().to_string();
 
-    args.extend_from_slice(&[
-        "--outfile".to_string(),
-        outfile.to_string_lossy().to_string(),
-        "--outdir".to_string(),
-        outdir.path().to_string_lossy().to_string(),
-    ]);
+    let args = vec![
+        "--consensi",
+        args.consensi,
+        "--instances",
+        args.instances,
+        "--independence-threshold",
+        args.independence,
+        "--confidence-margin",
+        args.confidence,
+        "--align-matrix",
+        MATRIX,
+        "--outfile",
+        &outname,
+        "--outdir",
+        &outdir_name,
+    ];
 
     dbg!(Command::cargo_bin(PRG)?.args(args.clone()));
 
