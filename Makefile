@@ -34,6 +34,5 @@ alu:
 		--outdir       ./alu-out \
 		--align-matrix $(MATRIX) 
 
-
 clean:
 	rm -rf RM_* makedb.log tests/inputs/consensi.fa.*

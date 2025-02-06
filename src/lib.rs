@@ -210,7 +210,7 @@ struct MergeFamilies<'a> {
 //     [ "Charlie1a", "Charlie1", "Charlie2a", "Charlie2b" ],
 // ]
 pub fn cluster(
-    outdir: &PathBuf,
+    outdir: &Path,
     cli_args: &Cli,
     cluster_args: ClusterArgs,
 ) -> Result<()> {
@@ -232,7 +232,7 @@ pub fn cluster(
 }
 
 // --------------------------------------------------
-pub fn merge(outdir: &PathBuf, cli_args: &Cli, merge_args: MergeArgs) -> Result<()> {
+pub fn merge(outdir: &Path, cli_args: &Cli, merge_args: MergeArgs) -> Result<()> {
     if let Some(path) = &cli_args.align_matrix {
         if !path.is_file() {
             bail!("--align-matrix '{}' does not exist", path.display());
