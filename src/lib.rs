@@ -14,7 +14,7 @@ use noodles_fasta::{
     io::Writer as FastaWriter,
     record::{Definition as FastaDefinition, Record as FastaRecord},
 };
-use rand::{self, prelude::IndexedRandom, seq::SliceRandom};
+use rand::{self, prelude::IndexedRandom}; //seq::SliceRandom};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -217,7 +217,7 @@ pub fn cluster(
     let blast_dir = outdir.join("consensi_cluster");
     let output = run_rmblastn(
         &blast_dir,
-        &cli_args,
+        cli_args,
         &cluster_args.consensi,
         &cluster_args.consensi,
     )?;
@@ -366,7 +366,7 @@ fn run_batch<W: Write>(
         // On the first round, all the original consensi will be included.
         // On future rounds, only the newly merged consensi will be present.
         let alignment_file =
-            run_rmblastn(&round_dir, &cli_args, &consensi, all_seqs_path)?;
+            run_rmblastn(&round_dir, cli_args, &consensi, all_seqs_path)?;
 
         // Extract the scores from the alignment file.
         // On the first round, there will be no "prev_scores" file.
