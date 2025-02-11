@@ -17,7 +17,6 @@ use std::collections::HashMap;
 pub fn connected_components(records: Vec<RmBlastOutput>) -> Vec<Vec<String>> {
     let mut seq_to_id: HashMap<String, usize> = HashMap::new();
     let mut id_to_seq: HashMap<usize, String> = HashMap::new();
-
     let mut id_cnt = 0usize;
 
     records.iter().for_each(|record| {
@@ -33,11 +32,20 @@ pub fn connected_components(records: Vec<RmBlastOutput>) -> Vec<Vec<String>> {
 
     let edges: Vec<_> = records
         .iter()
-        .map(|r| {
-            (
-                *seq_to_id.get(&r.query).unwrap(),
-                *seq_to_id.get(&r.target).unwrap(),
-            )
+        .filter(|record| record.query != record.target)
+        .filter_map(|record| {
+            // The coverage of the hits to either the query or subject must
+            // be at least half of the sequence length.
+            let query_span = 1 + record.query_end.abs_diff(record.query_start);
+            let subject_span = 1 + record.subject_end.abs_diff(record.subject_start);
+            ((query_span >= (record.query_len / 2))
+                || (subject_span >= (record.subject_len / 2)))
+                .then(|| {
+                    (
+                        *seq_to_id.get(&record.query).unwrap(),
+                        *seq_to_id.get(&record.target).unwrap(),
+                    )
+                })
         })
         .collect();
 
@@ -75,4 +83,33 @@ where
     }
 
     components
+}
+
+// --------------------------------------------------
+#[cfg(test)]
+mod graph_tests {
+    use crate::{graph::connected_components, parse_alignment};
+    use anyhow::Result;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_connected_components() -> Result<()> {
+        let path = PathBuf::from("./tests/inputs/blast-consensi-self.tsv");
+        let alignments = parse_alignment(&path)?;
+        assert_eq!(alignments.len(), 100);
+
+        let mut components = connected_components(alignments);
+        components.sort_by_key(|v| v.len());
+
+        // Two alignments were excluded by the filters
+        assert_eq!(components.iter().map(|c| c.len()).sum::<usize>(), 98);
+
+        // There are 47 groups
+        assert_eq!(components.len(), 47);
+
+        // The largest group has 46 members
+        assert_eq!(components.last().unwrap().len(), 46);
+
+        Ok(())
+    }
 }

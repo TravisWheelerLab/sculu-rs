@@ -18,7 +18,7 @@ dup:
 alu:
 	cargo run -- \
 		--consensi     data/alu/alu_consensi.fa \
-		--instances    data/alu/subfams/*.fa \
+		--instances    data/alu/subfams \
 		--outfile      final-alu.fa \
 		--outdir       ./alu-out \
 		--align-matrix $(MATRIX) 
@@ -26,10 +26,18 @@ alu:
 mix:
 	cargo run -- \
 		--outdir     out-mixed \
-		--components out-mixed/components.json \
 		--consensi   data/mixed/consensi.fa \
 		--instances  data/mixed/instances \
 		--outfile    final-mixed.fa \
 		--align-matrix $(MATRIX)
+
+tua:
+	cargo run -- \
+        --align-matrix $(MATRIX) \
+        --outdir    ~/wheelerlab/tuatara/sculu-out \
+        --instances ~/wheelerlab/tuatara/instances \
+        --consensi  ~/wheelerlab/tuatara/consensi.fa \
+        --outfile   ~/wheelerlab/tuatara/new-consensi.fa
+
 clean:
 	rm -rf RM_* makedb.log tests/inputs/consensi.fa.*
