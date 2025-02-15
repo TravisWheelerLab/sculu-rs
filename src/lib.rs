@@ -19,6 +19,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp,
+    cmp::max,
     collections::{HashMap, HashSet},
     ffi::OsStr,
     fmt,
@@ -28,6 +29,9 @@ use std::{
     time::Instant,
 };
 use which::which;
+
+const MIN_INSTANCE_SEQUENCE_LENGTH: usize = 30;
+const MAX_NUM_INSTANCES: usize = 50;
 
 /// SCULU subfamily clustering tool
 #[derive(Debug, Parser)]
@@ -104,18 +108,6 @@ pub struct Args {
     #[arg(long, value_name = "ALIGN_WORD_SIZE", default_value = "7")]
     pub align_word_size: usize,
 
-    /// Alignment x-drop gap
-    #[arg(long, value_name = "ALIGN_XDROP_GAP", default_value = "100")]
-    pub align_xdrop_gap: usize,
-
-    /// Alignment x-drop ungap
-    #[arg(long, value_name = "ALIGN_XDROP_UNGAP", default_value = "400")]
-    pub align_xdrop_ungap: usize,
-
-    /// Alignment x-drop final
-    #[arg(long, value_name = "ALIGN_XDROP_FINAL", default_value = "200")]
-    pub align_xdrop_final: usize,
-
     /// Alignment dust option
     #[arg(long)]
     pub align_dust: bool,
@@ -130,7 +122,7 @@ pub struct Args {
 
     /// Alignment minimum score
     #[arg(long, value_name = "MINSCORE", default_value = "200")]
-    pub align_min_score: i64,
+    pub align_min_raw_gapped_score: i64,
 }
 
 #[derive(PartialEq, Parser, Debug, Clone, Default)]
@@ -157,20 +149,21 @@ impl ValueEnum for Command {
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 struct RmBlastOutput {
-    score: u32,
+    score: usize,
     target: String,
     query: String,
-    query_len: u64,
-    query_start: u64,
-    query_end: u64,
-    subject_len: u64,
-    subject_start: u64,
-    subject_end: u64,
+    query_len: usize,
+    query_start: usize,
+    query_end: usize,
+    subject_len: usize,
+    subject_start: usize,
+    subject_end: usize,
+    cpg_kdiv: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AlignmentScore {
-    score: u32,
+    score: usize,
     target: String,
     query: String,
 }
@@ -183,7 +176,7 @@ struct Independence {
 }
 
 #[derive(Debug)]
-struct Components {
+pub struct Components {
     singletons: Option<PathBuf>,
     components: Vec<PathBuf>,
 }
@@ -214,6 +207,13 @@ struct MergeFamilies<'a> {
     perl5lib: &'a Option<String>,
 }
 
+#[derive(Debug, PartialEq)]
+struct BlastAlignment {
+    query: String,
+    divergence: f64,
+    query_length: usize,
+}
+
 // --------------------------------------------------
 pub fn run(args: Args) -> Result<()> {
     if !&args.outdir.is_dir() {
@@ -237,11 +237,11 @@ pub fn run(args: Args) -> Result<()> {
     //        File::create(args.outdir.join("debug.log"))?,
     //    ))))
     //    .init();
+    //
 
-    let (consensi_file, family_to_instance) =
-        check_family_instances(&args.outdir, &args.consensi, &args.instances)?;
-    //debug!("family_to_instance = '{family_to_instance:#?}'");
-    dbg!(&args);
+    let (consensi_file, family_to_instance) = check_family_instances(&args)?;
+    debug!("family_to_instance = '{family_to_instance:#?}'");
+    panic!();
 
     if let Some(ref component_file) = args.components {
         let merged =
@@ -386,62 +386,23 @@ pub fn align_consensi_to_self(consensi: &Path, args: &Args) -> Result<Components
 }
 
 // --------------------------------------------------
-//pub fn merge(
-//    consensi_file: &Path,
-//    component_file: &PathBuf,
-//    args: &Args,
-//) -> Result<()> {
-//    if let Some(path) = &args.align_matrix {
-//        if !path.is_file() {
-//            bail!("--align-matrix '{}' does not exist", path.display());
-//        }
-//    }
-//
-//    // Final output file
-//    if args.outfile.is_file() && args.outfile.metadata()?.len() > 0 {
-//        bail!(r#"--outfile "{}" exists"#, args.outfile.display())
-//    }
-//    let outfile = BufWriter::new(File::create(&args.outfile)?);
-//    let mut fasta_writer = FastaWriter::new(outfile);
-//    let json = fs::read_to_string(components_file)?;
-//    let components: Components = serde_json::from_str(&json)?;
-//    dbg!(&components);
-//    debug!("components = {components:?}");
-//
-//    let mut batch_num = 0;
-//    for families in components.components {
-//        if families.len() == 1 {
-//            debug!("Extracting independent family '{}'", families[0]);
-//            copy_fasta(&families, &consensi_file, &mut fasta_writer)?
-//        } else {
-//            batch_num += 1;
-//            run_batch(batch_num, consensi_file, families, &mut fasta_writer, &args)?
-//        }
-//    }
-//
-//    println!(
-//        r#"Done, see final families in "{}""#,
-//        args.outfile.display()
-//    );
-//    Ok(())
-//}
-
-// --------------------------------------------------
 fn copy_fasta<W: Write>(
     wanted_families: &[String],
     source: &PathBuf,
     destination: &mut FastaWriter<W>,
-) -> Result<()> {
-    let mut reader = FastaReader::new(BufReader::new(open(source)?));
+) -> Result<usize> {
+    let mut reader = FastaReader::new(open(source)?);
+    let mut num_taken = 0;
     for result in reader.records() {
         let record = result?;
         let family = String::from_utf8(record.name().to_vec())?;
         if wanted_families.contains(&family) {
             destination.write_record(&record)?;
+            num_taken += 1;
         }
     }
 
-    Ok(())
+    Ok(num_taken)
 }
 
 // --------------------------------------------------
@@ -482,7 +443,15 @@ fn merge_component(
         // Scoped to cause fasta_writer to close
         let mut fasta_writer =
             FastaWriter::new(BufWriter::new(open_for_write(&consensi)?));
-        copy_fasta(&families, &consensi_file.to_path_buf(), &mut fasta_writer)?;
+        let num_taken =
+            copy_fasta(&families, &consensi_file.to_path_buf(), &mut fasta_writer)?;
+
+        if num_taken == 0 {
+            bail!(
+                "Failed to copy consensi sequences to '{}'",
+                consensi_file.display()
+            );
+        }
     }
 
     // Create query file for families
@@ -659,7 +628,7 @@ fn merge_component(
         consensi = new_consensi_path.to_path_buf();
     }
 
-    let mut reader = FastaReader::new(BufReader::new(open(&consensi)?));
+    let mut reader = FastaReader::new(open(&consensi)?);
     let mut new_seqs = 0;
     for result in reader.records() {
         let mut record = result?;
@@ -743,27 +712,28 @@ fn run_rmblastn(
             "-out".to_string(),
             outfile.to_string_lossy().to_string(),
             "-outfmt".to_string(),
-            "6 score qseqid sseqid qlen qstart qend slen sstart send".to_string(),
+            "6 score qseqid sseqid qlen qstart qend slen sstart send cpg_kdiv"
+                .to_string(),
             "-num_threads".to_string(),
             args.num_threads.unwrap_or(num_cpus::get()).to_string(),
             "-num_alignments".to_string(),
             "9999999".to_string(),
             "-mask_level".to_string(),
             args.align_mask_level.to_string(),
-            "-min_raw_gapped_score".to_string(),
-            args.align_min_score.to_string(),
             "-gapopen".to_string(),
             args.align_gap_open.to_string(),
             "-gapextend".to_string(),
             args.align_gap_extension.to_string(),
             "-word_size".to_string(),
             args.align_word_size.to_string(),
+            "-min_raw_gapped_score".to_string(),
+            args.align_min_raw_gapped_score.to_string(),
             "-xdrop_ungap".to_string(),
-            args.align_xdrop_ungap.to_string(),
-            "-xdrop_gap_final".to_string(),
-            args.align_xdrop_final.to_string(),
+            (args.align_min_raw_gapped_score * 2).to_string(),
             "-xdrop_gap".to_string(),
-            args.align_xdrop_gap.to_string(),
+            (args.align_min_raw_gapped_score / 2).to_string(),
+            "-xdrop_gap_final".to_string(),
+            args.align_min_raw_gapped_score.to_string(),
             "-dust".to_string(),
             if args.align_dust {
                 "yes".to_string()
@@ -824,7 +794,7 @@ fn run_rmblastn(
 }
 
 // --------------------------------------------------
-fn bitscore_to_confidence(vals: &[&u32], lambda: f64) -> Result<Vec<f64>> {
+fn bitscore_to_confidence(vals: &[&usize], lambda: f64) -> Result<Vec<f64>> {
     let mut converted: Vec<_> =
         vals.iter().map(|&&v| (v as f64 * lambda).exp2()).collect();
 
@@ -862,7 +832,7 @@ fn call_winners(
         .from_path(scores_file)?;
     let records = reader.deserialize();
 
-    let mut scores: HashMap<String, HashMap<String, u32>> = HashMap::new();
+    let mut scores: HashMap<String, HashMap<String, usize>> = HashMap::new();
 
     for res in records {
         let rec: AlignmentScore = res?;
@@ -977,23 +947,32 @@ fn cat_sequences(
 }
 
 // --------------------------------------------------
-fn check_family_instances(
-    outdir: &Path,
-    consensi_file: &PathBuf,
-    instances_dir: &PathBuf,
-) -> Result<(PathBuf, HashMap<String, PathBuf>)> {
-    debug!("Checking consensi_file '{}'", consensi_file.display());
+fn check_family_instances(args: &Args) -> Result<(PathBuf, HashMap<String, PathBuf>)> {
+    debug!("Checking consensi_file '{}'", args.consensi.display());
+
+    let taken_instances_dir = args.outdir.join("instances");
+    fs::create_dir_all(&taken_instances_dir)?;
 
     // Create hashmap from family name to instance file
     let mut family_to_instance: HashMap<String, PathBuf> = HashMap::new();
-    for entry in fs::read_dir(instances_dir)? {
+    for entry in fs::read_dir(&args.instances)? {
         let entry = entry?;
         let path = entry.path();
         if let Some(stem) = path.file_stem() {
             // Skip hidden files
-            if !stem.to_str().unwrap().starts_with(".") {
-                family_to_instance
-                    .insert(stem.to_string_lossy().to_string(), path.clone());
+            let family_name = stem.to_string_lossy().to_string();
+            if !family_name.starts_with(".") {
+                let taken_path = taken_instances_dir.join(stem);
+                let num_taken = select_instances(
+                    &args.consensi.to_path_buf(),
+                    &family_name,
+                    &path,
+                    &taken_path,
+                    args,
+                )?;
+                if num_taken > 0 {
+                    family_to_instance.insert(family_name, taken_path);
+                }
             }
         } else {
             bail!("Cannot get filename from {}", path.display());
@@ -1002,9 +981,9 @@ fn check_family_instances(
     //debug!("family_to_instance {family_to_instance:#?}");
 
     // Create a file to move the consensi that have instances
-    let taken_consensi_path = outdir.join("consensi.fa");
+    let taken_consensi_path = args.outdir.join("consensi.fa");
     let mut out_consensi = open_for_write(&taken_consensi_path)?;
-    let mut reader = parse_reader(open(consensi_file)?)?;
+    let mut reader = parse_reader(open(&args.consensi)?)?;
     let mut consensi_names: HashMap<String, u32> = HashMap::new();
     while let Some(rec) = reader.iter_record()? {
         let family = rec.head().to_string();
@@ -1055,6 +1034,123 @@ fn check_family_instances(
     }
 
     Ok((taken_consensi_path, family_to_instance))
+}
+
+// --------------------------------------------------
+fn select_instances(
+    consensi_path: &PathBuf,
+    family_name: &str,
+    from_path: &PathBuf,
+    to_path: &PathBuf,
+    args: &Args,
+) -> Result<usize> {
+    let blast_dir = args.outdir.join("select").join(family_name);
+    fs::create_dir_all(&blast_dir)?;
+
+    // Extract the family's consensus sequence
+    let subject_path: PathBuf = {
+        let db_path = blast_dir.join("db.fa");
+        let mut writer = FastaWriter::new(BufWriter::new(open_for_write(&db_path)?));
+        let num_taken =
+            copy_fasta(&[family_name.to_string()], consensi_path, &mut writer)?;
+
+        if num_taken != 1 {
+            bail!(
+                "Failed to find family '{family_name}' in consensi '{}'",
+                consensi_path.display()
+            );
+        }
+        db_path
+    };
+
+    // Get the length of the consensus
+    let mut reader = FastaReader::new(open(&subject_path)?);
+    let consensus_len = reader
+        .records()
+        .next()
+        .unwrap()
+        .map(|rec| rec.sequence().len())?;
+
+    // BLAST the instances to the consensus
+    let blast_out = run_rmblastn(&blast_dir, args, &subject_path, from_path)?;
+    let alignments = parse_alignment(&blast_out)?;
+
+    // Remove short alignments, find the highest score for each hit
+    let mut targets: HashMap<String, usize> = HashMap::new();
+    for aln in alignments
+        .iter()
+        .filter(|aln| aln.query_len >= MIN_INSTANCE_SEQUENCE_LENGTH)
+    {
+        if let Some(val) = targets.get_mut(&aln.target) {
+            *val = max(aln.score, *val);
+        } else {
+            targets.insert(aln.target.clone(), aln.score);
+        }
+    }
+
+    // Create a lookup of the (target, high score)
+    let wanted: HashSet<(String, usize)> = targets.into_iter().collect();
+
+    // Use the "wanted" hash to filter the alignments to the single best hit
+    let mut filtered: Vec<_> = alignments
+        .into_iter()
+        .filter(|aln| wanted.contains(&(aln.target.clone(), aln.score)))
+        .collect();
+
+    // Sort the hits by CpG-adjusted Kimura divergence ascending
+    filtered.sort_by(|a, b| a.cpg_kdiv.partial_cmp(&b.cpg_kdiv).unwrap());
+
+    // Split into top 75%, bottom 25%
+    let num = filtered.len();
+    let three_quarters = num / 2 + num / 4;
+    let (best, worst) = filtered.split_at_mut(three_quarters);
+
+    // Sort by query_len descending
+    best.sort_by(|a, b| b.query_len.cmp(&a.query_len));
+    worst.sort_by(|a, b| b.query_len.cmp(&a.query_len));
+
+    // Create an array represting 10-bp chunks of the consensus to measure
+    // coverage by the instances
+    let mut consensus_cov = vec![0; consensus_len / 10];
+
+    let mut writer = FastaWriter::new(BufWriter::new(open_for_write(to_path)?));
+    let mut i = 0;
+    let mut j = 0;
+    let mut num_taken = 0;
+    let mut coverage_reached = false;
+    loop {
+        if coverage_reached
+            || num_taken == MAX_NUM_INSTANCES
+            || ((i == best.len() - 1) && (j == worst.len() - 1))
+        {
+            break;
+        }
+        let aln = if i < best.len() {
+            println!("Take from best");
+            let val = best[i].clone();
+            i += 1;
+            val
+        } else {
+            println!("Take from worst");
+            let val = worst[j].clone();
+            j += 1;
+            val
+        };
+
+        dbg!(&aln);
+        for bucket in (aln.subject_start / 10)..(aln.subject_end / 10) {
+            consensus_cov[bucket] += 1;
+        }
+        println!("consensus_len {consensus_len}");
+        println!("{consensus_cov:?}");
+
+        //writer.write_record(&record)?;
+        num_taken += 1;
+
+        //break;
+    }
+
+    Ok(num_taken)
 }
 
 // --------------------------------------------------
@@ -1433,7 +1529,8 @@ mod tests {
     use super::{
         bitscore_to_confidence, call_winners, cat_sequences, downsample,
         extract_scores, find_independence, format_seconds, independence,
-        number_consensi, open, parse_newick, Independence, StringPair, Winners,
+        number_consensi, open, parse_blast_divergence, parse_newick, BlastAlignment,
+        Independence, StringPair, Winners,
     };
     use anyhow::Result;
     use kseq::parse_reader;
@@ -1848,6 +1945,47 @@ mod tests {
                 subject_len: 501,
                 subject_start: 63,
                 subject_end: 102,
+                cpg_kdiv: 0.2,
+            }
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_blast_divergence() -> Result<()> {
+        let blast_out = PathBuf::from("tests/inputs/blast-alignment.txt");
+        let res = parse_blast_divergence(&blast_out);
+        dbg!(&res);
+        assert!(res.is_ok());
+
+        let res = res.unwrap();
+        assert_eq!(res.len(), 3);
+
+        assert_eq!(
+            res[0],
+            BlastAlignment {
+                query: "hg38:chr11:127353813-127354130".to_string(),
+                query_length: 318,
+                divergence: 0.0
+            }
+        );
+
+        assert_eq!(
+            res[1],
+            BlastAlignment {
+                query: "hg38:chr21:29781969-29781654".to_string(),
+                query_length: 316,
+                divergence: 0.32
+            }
+        );
+
+        assert_eq!(
+            res[2],
+            BlastAlignment {
+                query: "hg38:chr5:167342826-167342539".to_string(),
+                query_length: 288,
+                divergence: 0.42
             }
         );
 

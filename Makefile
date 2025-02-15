@@ -2,8 +2,8 @@ MATRIX = $(shell pwd)/tests/inputs/matrices/25p41g.matrix
 
 run:
 	cargo run -- \
-		--outfile                test.fa \
 		--outdir                 out-test \
+		--outfile                out-test/test.fa \
 		--consensi               tests/inputs/consensi.fa \
 		--instances              tests/inputs/instances \
 		--independence-threshold .8 \
