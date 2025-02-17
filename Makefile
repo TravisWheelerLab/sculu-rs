@@ -31,8 +31,10 @@ mix:
 		--outfile    final-mixed.fa \
 		--align-matrix $(MATRIX)
 
+# cargo run -- \
+
 tua:
-	cargo run -- \
+	./target/release/sculu \
         --align-matrix $(MATRIX) \
         --outdir    ~/wheelerlab/tuatara/sculu-out \
         --instances ~/wheelerlab/tuatara/instances \

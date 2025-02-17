@@ -14,7 +14,8 @@ use noodles_fasta::{
     io::Writer as FastaWriter,
     record::{Definition as FastaDefinition, Record as FastaRecord},
 };
-use rand::{self, prelude::IndexedRandom}; //seq::SliceRandom};
+use rand::{self, prelude::IndexedRandom};
+use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -31,7 +32,8 @@ use std::{
 use which::which;
 
 const MIN_INSTANCE_SEQUENCE_LENGTH: usize = 30;
-const MAX_NUM_INSTANCES: usize = 50;
+const MIN_CONSENSUS_COVERAGE: usize = 10;
+const MAX_NUM_INSTANCES: usize = 100;
 
 /// SCULU subfamily clustering tool
 #[derive(Debug, Parser)]
@@ -133,6 +135,12 @@ pub enum Command {
     Merge,
 }
 
+#[derive(Debug, PartialEq)]
+enum Partition {
+    Top,
+    Bottom,
+}
+
 impl ValueEnum for Command {
     fn value_variants<'a>() -> &'a [Self] {
         &[Command::All, Command::Cluster, Command::Merge]
@@ -207,13 +215,6 @@ struct MergeFamilies<'a> {
     perl5lib: &'a Option<String>,
 }
 
-#[derive(Debug, PartialEq)]
-struct BlastAlignment {
-    query: String,
-    divergence: f64,
-    query_length: usize,
-}
-
 // --------------------------------------------------
 pub fn run(args: Args) -> Result<()> {
     if !&args.outdir.is_dir() {
@@ -240,8 +241,7 @@ pub fn run(args: Args) -> Result<()> {
     //
 
     let (consensi_file, family_to_instance) = check_family_instances(&args)?;
-    debug!("family_to_instance = '{family_to_instance:#?}'");
-    panic!();
+    //debug!("family_to_instance = '{family_to_instance:#?}'");
 
     if let Some(ref component_file) = args.components {
         let merged =
@@ -953,32 +953,53 @@ fn check_family_instances(args: &Args) -> Result<(PathBuf, HashMap<String, PathB
     let taken_instances_dir = args.outdir.join("instances");
     fs::create_dir_all(&taken_instances_dir)?;
 
+    // Find all the instance files
+    let instances: Vec<_> = fs::read_dir(&args.instances)?
+        .map_while(Result::ok)
+        .collect();
+
+    let now = Instant::now();
+    instances.par_iter().try_for_each(|entry| -> Result<()> {
+        let instance_path = entry.path();
+        if let Some(instance_stem) = instance_path.file_stem() {
+            // Skip hidden files
+            let family_name = instance_stem.to_string_lossy().to_string();
+            if !family_name.starts_with(".") {
+                let taken_path = taken_instances_dir.join(format!("{family_name}.fa"));
+                match select_instances(
+                    &args.consensi.to_path_buf(),
+                    &family_name,
+                    &instance_path,
+                    &taken_path,
+                    args,
+                ) {
+                    Ok(num_taken) => {
+                        debug!("Took {num_taken} instances for {family_name}");
+                    }
+                    Err(e) => eprintln!("{e}"),
+                }
+            }
+        } else {
+            eprintln!(
+                "Cannot get filename for instance {}",
+                instance_path.display()
+            );
+        }
+        Ok(())
+    })?;
+
     // Create hashmap from family name to instance file
     let mut family_to_instance: HashMap<String, PathBuf> = HashMap::new();
     for entry in fs::read_dir(&args.instances)? {
         let entry = entry?;
-        let path = entry.path();
-        if let Some(stem) = path.file_stem() {
-            // Skip hidden files
+        if let Some(stem) = entry.path().file_stem() {
             let family_name = stem.to_string_lossy().to_string();
-            if !family_name.starts_with(".") {
-                let taken_path = taken_instances_dir.join(stem);
-                let num_taken = select_instances(
-                    &args.consensi.to_path_buf(),
-                    &family_name,
-                    &path,
-                    &taken_path,
-                    args,
-                )?;
-                if num_taken > 0 {
-                    family_to_instance.insert(family_name, taken_path);
-                }
-            }
-        } else {
-            bail!("Cannot get filename from {}", path.display());
+            family_to_instance.insert(family_name, entry.path().clone());
         }
     }
     //debug!("family_to_instance {family_to_instance:#?}");
+    debug!("Finished instance selection in {:?}", now.elaped());
+    panic!();
 
     // Create a file to move the consensi that have instances
     let taken_consensi_path = args.outdir.join("consensi.fa");
@@ -1109,45 +1130,66 @@ fn select_instances(
     best.sort_by(|a, b| b.query_len.cmp(&a.query_len));
     worst.sort_by(|a, b| b.query_len.cmp(&a.query_len));
 
-    // Create an array represting 10-bp chunks of the consensus to measure
+    // Create an array representing 10-bp chunks of the consensus to measure
     // coverage by the instances
-    let mut consensus_cov = vec![0; consensus_len / 10];
+    let mut consensus_cov = vec![0; consensus_len.div_ceil(10)];
+    let mut i = 0; // Index into "best"
+    let mut j = 0; // Index into "worst"
+    let mut wanted = HashSet::new(); // Target names of the instances we want
+    let mut coverage_reached = false; // Flag for sufficient coverage has been met
 
-    let mut writer = FastaWriter::new(BufWriter::new(open_for_write(to_path)?));
-    let mut i = 0;
-    let mut j = 0;
-    let mut num_taken = 0;
-    let mut coverage_reached = false;
     loop {
-        if coverage_reached
-            || num_taken == MAX_NUM_INSTANCES
-            || ((i == best.len() - 1) && (j == worst.len() - 1))
+        // Exit if target number of instances (100?)
+        // AND the coverage depth target ("coverageReached") has been met.
+        // OR if we've exhausted the best/worse arrays
+        if wanted.len() >= MAX_NUM_INSTANCES && coverage_reached
+            || ((i == best.len()) && (j == worst.len()))
         {
             break;
         }
-        let aln = if i < best.len() {
-            println!("Take from best");
+
+        let (aln, partition) = if i < best.len() {
             let val = best[i].clone();
             i += 1;
-            val
+            (val, Partition::Top)
         } else {
-            println!("Take from worst");
             let val = worst[j].clone();
             j += 1;
-            val
+            (val, Partition::Bottom)
         };
 
-        dbg!(&aln);
-        for bucket in (aln.subject_start / 10)..(aln.subject_end / 10) {
-            consensus_cov[bucket] += 1;
+        let bins: Vec<_> =
+            ((aln.subject_start / 10)..(aln.subject_end.div_ceil(10))).collect();
+        let new_cov: Vec<_> = bins.iter().map(|i| consensus_cov[*i] + 1).collect();
+        let supports_cov = new_cov.iter().any(|&val| val <= 10);
+
+        if partition == Partition::Top || supports_cov {
+            // Add the instance
+            wanted.insert(aln.target);
+
+            // Increment the consensus coverage
+            for bin in bins {
+                consensus_cov[bin] += 1;
+            }
         }
-        println!("consensus_len {consensus_len}");
-        println!("{consensus_cov:?}");
 
-        //writer.write_record(&record)?;
-        num_taken += 1;
+        // Iterate over all positions in the coverage array.
+        // If all positions in the consensus are above the coverage
+        // depth target (10), set flag ("coverageReached")
+        coverage_reached = consensus_cov
+            .iter()
+            .all(|val| *val >= MIN_CONSENSUS_COVERAGE);
+    }
 
-        //break;
+    let mut reader = FastaReader::new(BufReader::new(open(from_path)?));
+    let mut fasta_writer = FastaWriter::new(BufWriter::new(open_for_write(to_path)?));
+    let mut num_taken = 0;
+    for record in reader.records().map_while(Result::ok) {
+        let name = String::from_utf8(record.name().to_vec())?;
+        if wanted.contains(&name) {
+            fasta_writer.write_record(&record)?;
+            num_taken += 1;
+        }
     }
 
     Ok(num_taken)
@@ -1529,8 +1571,8 @@ mod tests {
     use super::{
         bitscore_to_confidence, call_winners, cat_sequences, downsample,
         extract_scores, find_independence, format_seconds, independence,
-        number_consensi, open, parse_blast_divergence, parse_newick, BlastAlignment,
-        Independence, StringPair, Winners,
+        number_consensi, open, parse_blast_divergence, parse_newick, Independence,
+        StringPair, Winners,
     };
     use anyhow::Result;
     use kseq::parse_reader;
@@ -1946,46 +1988,6 @@ mod tests {
                 subject_start: 63,
                 subject_end: 102,
                 cpg_kdiv: 0.2,
-            }
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_parse_blast_divergence() -> Result<()> {
-        let blast_out = PathBuf::from("tests/inputs/blast-alignment.txt");
-        let res = parse_blast_divergence(&blast_out);
-        dbg!(&res);
-        assert!(res.is_ok());
-
-        let res = res.unwrap();
-        assert_eq!(res.len(), 3);
-
-        assert_eq!(
-            res[0],
-            BlastAlignment {
-                query: "hg38:chr11:127353813-127354130".to_string(),
-                query_length: 318,
-                divergence: 0.0
-            }
-        );
-
-        assert_eq!(
-            res[1],
-            BlastAlignment {
-                query: "hg38:chr21:29781969-29781654".to_string(),
-                query_length: 316,
-                divergence: 0.32
-            }
-        );
-
-        assert_eq!(
-            res[2],
-            BlastAlignment {
-                query: "hg38:chr5:167342826-167342539".to_string(),
-                query_length: 288,
-                divergence: 0.42
             }
         );
 
