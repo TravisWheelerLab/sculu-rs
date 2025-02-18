@@ -34,7 +34,7 @@ mix:
 # cargo run -- \
 
 tua:
-	./target/release/sculu \
+	cargo run -- \
         --align-matrix $(MATRIX) \
         --outdir    ~/wheelerlab/tuatara/sculu-out \
         --instances ~/wheelerlab/tuatara/instances \

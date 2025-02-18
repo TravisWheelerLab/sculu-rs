@@ -998,7 +998,7 @@ fn check_family_instances(args: &Args) -> Result<(PathBuf, HashMap<String, PathB
         }
     }
     //debug!("family_to_instance {family_to_instance:#?}");
-    debug!("Finished instance selection in {:?}", now.elaped());
+    debug!("Finished instance selection in {:?}", now.elapsed());
     panic!();
 
     // Create a file to move the consensi that have instances
