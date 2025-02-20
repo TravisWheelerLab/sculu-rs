@@ -14,7 +14,6 @@ use noodles_fasta::{
     io::Writer as FastaWriter,
     record::{Definition as FastaDefinition, Record as FastaRecord},
 };
-use rand::{self, prelude::IndexedRandom};
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -22,7 +21,6 @@ use std::{
     cmp,
     cmp::max,
     collections::{HashMap, HashSet},
-    ffi::OsStr,
     fmt,
     fs::{self, File},
     io::{BufRead, BufReader, BufWriter, Write},
@@ -32,8 +30,9 @@ use std::{
 use which::which;
 
 const MIN_INSTANCE_SEQUENCE_LENGTH: usize = 30;
-const MIN_CONSENSUS_COVERAGE: usize = 10;
+const MIN_CONSENSUS_COVERAGE: usize = 5;
 const MAX_NUM_INSTANCES: usize = 100;
+const MIN_NUM_INSTANCES: usize = 10;
 
 /// SCULU subfamily clustering tool
 #[derive(Debug, Parser)]
@@ -123,7 +122,7 @@ pub struct Args {
     pub align_mask_level: i64,
 
     /// Alignment minimum score
-    #[arg(long, value_name = "MINSCORE", default_value = "200")]
+    #[arg(long, value_name = "MINSCORE", default_value = "400")]
     pub align_min_raw_gapped_score: i64,
 }
 
@@ -209,7 +208,7 @@ struct MergeFamilies<'a> {
     family1: String,
     family2: String,
     outdir: PathBuf,
-    instances_dir: &'a PathBuf,
+    taken_instances_dir: &'a PathBuf,
     num_threads: usize,
     refiner: &'a Option<String>,
     perl5lib: &'a Option<String>,
@@ -227,36 +226,53 @@ pub fn run(args: Args) -> Result<()> {
         }
     }
 
-    env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Debug)
-        .target(env_logger::Target::Stdout)
-        .init();
-
     //env_logger::Builder::new()
     //    .filter_level(log::LevelFilter::Debug)
-    //    .target(env_logger::Target::Pipe(Box::new(BufWriter::new(
-    //        File::create(args.outdir.join("debug.log"))?,
-    //    ))))
+    //    .target(env_logger::Target::Stdout)
     //    .init();
-    //
 
-    let (consensi_file, family_to_instance) = check_family_instances(&args)?;
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Debug)
+        .target(env_logger::Target::Pipe(Box::new(BufWriter::new(
+            File::create(args.outdir.join("debug.log"))?,
+        ))))
+        .init();
+
+    let taken_instances_dir = args.outdir.join("instances");
+    fs::create_dir_all(&taken_instances_dir)?;
+
+    let (consensi_file, family_to_instance) =
+        check_family_instances(&args, &taken_instances_dir)?;
     //debug!("family_to_instance = '{family_to_instance:#?}'");
 
     if let Some(ref component_file) = args.components {
-        let merged =
-            merge_component(component_file, &consensi_file, family_to_instance, &args)?;
-        println!(
-            "Component '{}' merged into '{}'",
+        let merged = merge_component(
+            component_file,
+            &consensi_file,
+            family_to_instance,
+            &taken_instances_dir,
+            &args,
+        )?;
+        debug!(
+            "'{}' merged into '{}'",
             component_file.display(),
             merged.display()
         );
     } else {
-        println!("BOO");
         // This will only BLAST if there are no components from a previous run
         let components = align_consensi_to_self(&consensi_file, &args)?;
+
+        let mut fasta_writer =
+            FastaWriter::new(BufWriter::new(open_for_write(&args.outfile)?));
+
+        if let Some(file) = components.singletons {
+            let singletons = read_lines(&file)?;
+            debug!("Copying {} from singletons file", singletons.len());
+            copy_fasta(&singletons, &args.consensi, &mut fasta_writer)?;
+        }
+
         debug!(
-            "Found {} component{}",
+            "Processing {} component{}",
             components.components.len(),
             if components.components.len() == 1 {
                 ""
@@ -265,32 +281,21 @@ pub fn run(args: Args) -> Result<()> {
             }
         );
 
-        let mut fasta_writer =
-            FastaWriter::new(BufWriter::new(open_for_write(&args.outfile)?));
-
-        if let Some(file) = components.singletons {
-            let singletons: Vec<String> = {
-                let contents = fs::read_to_string(&file)
-                    .map_err(|e| anyhow!("{}: {e}", &file.display()))?;
-                contents.split("\n").map(String::from).collect()
-            };
-            debug!("Copying {} from singletons file", singletons.len());
-            copy_fasta(&singletons, &args.consensi, &mut fasta_writer)?;
-        }
-
         for component_file in components.components {
             let outfile = merge_component(
                 &component_file,
                 &consensi_file,
                 family_to_instance.clone(),
+                &taken_instances_dir,
                 &args,
             )?;
 
-            println!(
-                "Component '{}' merged into '{}'",
+            debug!(
+                "'{}' merged into '{}'",
                 component_file.display(),
                 outfile.display()
             );
+
             let mut reader = FastaReader::new(BufReader::new(open(&outfile)?));
             for record in reader.records().map_while(Result::ok) {
                 fasta_writer.write_record(&record)?;
@@ -317,72 +322,59 @@ pub fn run(args: Args) -> Result<()> {
 // Returns the component file paths
 //
 pub fn align_consensi_to_self(consensi: &Path, args: &Args) -> Result<Components> {
-    println!("YO");
     let components_dir = args.outdir.join("components");
-    let mut component_files = if fs::exists(&components_dir)? {
-        fs::read_dir(&components_dir)?
-            .map_while(Result::ok)
-            .map(|entry| entry.path())
-            .collect()
-    } else {
-        fs::create_dir_all(&components_dir)?;
-        vec![]
-    };
+    fs::create_dir_all(&components_dir)?;
 
-    if component_files.is_empty() {
+    let num_components = fs::read_dir(&components_dir)?
+        .filter_map(|entry| entry.ok())
+        .collect::<Vec<_>>()
+        .len();
+
+    if num_components > 0 {
+        debug!("Reusing existing component files");
+    } else {
         let blast_dir = args.outdir.join("consensi_cluster");
         let output = run_rmblastn(&blast_dir, args, consensi, consensi)?;
         let mut components = graph::connected_components(parse_alignment(&output)?);
         components.sort_by_key(|v| v.len());
 
-        debug!("After aligning consensi to self, components =\n{components:#?}");
-        let singletons_file = components_dir.join("singletons");
-        let mut singletons = open_for_write(&singletons_file)?;
-        let mut counter = 0;
+        let (singles, multis) =
+            components.split_at(components.partition_point(|v| v.len() == 1));
 
-        for component in components {
-            if component.len() == 1 {
-                writeln!(singletons, "{}", component[0])?;
-            } else {
-                counter += 1;
-                let component_path =
-                    components_dir.join(format!("component-{counter}"));
-                let mut file = open_for_write(&component_path)?;
-                writeln!(file, "{}", component.join("\n"))?;
-                component_files.push(component_path.clone());
-            }
+        if !singles.is_empty() {
+            let singletons_file = components_dir.join("singletons");
+            let mut singletons = open_for_write(&singletons_file)?;
+            writeln!(singletons, "{}", singles.iter().flatten().join("\n"))?;
         }
 
-        if fs::metadata(&singletons_file)?.len() == 0 {
-            fs::remove_file(&singletons_file)?;
-        } else {
-            component_files.push(singletons_file.clone());
+        let width = multis.len().to_string().len();
+        for (num, component) in multis.iter().enumerate() {
+            let component_path = components_dir.join(format!("component-{num:0width$}"));
+            let mut file = open_for_write(&component_path)?;
+            writeln!(file, "{}", component.join("\n"))?;
         }
     }
 
-    let singleton = component_files
-        .iter()
-        .filter(|&f| f.file_name().unwrap() == OsStr::new("singletons"))
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut singletons: Option<PathBuf> = None;
+    let mut components = vec![];
+    for entry in fs::read_dir(&components_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path().to_path_buf();
 
-    let ret = Components {
-        singletons: singleton.first().cloned(),
-        components: component_files
-            .into_iter()
-            .filter(|f| {
-                f.file_name()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .starts_with("component-")
-            })
-            .collect::<Vec<_>>(),
-    };
+        if file_name == "singletons" {
+            singletons = Some(path)
+        } else if file_name.starts_with("component-") {
+            components.push((file_name, path))
+        }
+    }
+    // Sort by name, and the files are named in order of increasing size
+    components.sort_by_key(|t| t.0.clone());
 
-    debug!("Components {ret:?}",);
-
-    Ok(ret)
+    Ok(Components {
+        singletons,
+        components: components.into_iter().map(|(_name, path)| path).collect(),
+    })
 }
 
 // --------------------------------------------------
@@ -410,14 +402,11 @@ fn merge_component(
     component_file: &Path,
     consensi_file: &Path,
     mut family_to_instance: HashMap<String, PathBuf>,
+    taken_instances_dir: &PathBuf,
     args: &Args,
 ) -> Result<PathBuf> {
     // The "component-N" file will contain the names of the families
-    let families: Vec<String> = {
-        let contents = fs::read_to_string(component_file)
-            .map_err(|e| anyhow!("{}: {e}", component_file.display()))?;
-        contents.split("\n").map(String::from).collect()
-    };
+    let families = read_lines(&component_file.to_path_buf())?;
 
     // Create a working dir with the same name as the component file
     let component_name = component_file
@@ -429,11 +418,11 @@ fn merge_component(
     fs::create_dir_all(&batch_dir)?;
 
     debug!(
-        "==> Merging {component_name} for {} families <==",
+        "==> Component '{component_name}' has {} families <==",
         families.len()
     );
 
-    let outfile = batch_dir.join("merged.fa");
+    let outfile = batch_dir.join("final.fa");
     let mut final_writer = FastaWriter::new(BufWriter::new(open_for_write(&outfile)?));
     let start = Instant::now();
 
@@ -462,7 +451,7 @@ fn merge_component(
     );
 
     // Put the instances for the given families into a single file
-    cat_sequences(&args.instances, &families, all_seqs_path)?;
+    cat_sequences(taken_instances_dir, &families, all_seqs_path)?;
 
     // Create a starting directory for the merge iterations.
     let round0_dir = batch_dir.join("round000");
@@ -578,7 +567,7 @@ fn merge_component(
                     family1: pair.f1.clone(),
                     family2: pair.f2.clone(),
                     outdir: msa_dir.to_path_buf(),
-                    instances_dir: &args.instances,
+                    taken_instances_dir,
                     num_threads: args.num_threads.unwrap_or(num_cpus::get()),
                     refiner: &args.refiner,
                     perl5lib: &args.perl5lib,
@@ -947,16 +936,21 @@ fn cat_sequences(
 }
 
 // --------------------------------------------------
-fn check_family_instances(args: &Args) -> Result<(PathBuf, HashMap<String, PathBuf>)> {
+fn check_family_instances(
+    args: &Args,
+    taken_instances_dir: &PathBuf,
+) -> Result<(PathBuf, HashMap<String, PathBuf>)> {
     debug!("Checking consensi_file '{}'", args.consensi.display());
 
-    let taken_instances_dir = args.outdir.join("instances");
-    fs::create_dir_all(&taken_instances_dir)?;
-
-    // Find all the instance files
+    // Find all the input instance files
     let instances: Vec<_> = fs::read_dir(&args.instances)?
         .map_while(Result::ok)
         .collect();
+
+    debug!("Found {} instance files", instances.len());
+
+    let working_dir = args.outdir.join("select");
+    fs::create_dir_all(&working_dir)?;
 
     let now = Instant::now();
     instances.par_iter().try_for_each(|entry| -> Result<()> {
@@ -966,42 +960,45 @@ fn check_family_instances(args: &Args) -> Result<(PathBuf, HashMap<String, PathB
             let family_name = instance_stem.to_string_lossy().to_string();
             if !family_name.starts_with(".") {
                 let taken_path = taken_instances_dir.join(format!("{family_name}.fa"));
-                match select_instances(
+                if let Err(e) = select_instances(
                     &args.consensi.to_path_buf(),
                     &family_name,
                     &instance_path,
                     &taken_path,
+                    &working_dir,
                     args,
                 ) {
-                    Ok(num_taken) => {
-                        debug!("Took {num_taken} instances for {family_name}");
-                    }
-                    Err(e) => eprintln!("{e}"),
+                    eprintln!("Error: {e}");
                 }
             }
         } else {
             eprintln!(
-                "Cannot get filename for instance {}",
+                "Error: Cannot get filename for instance {}",
                 instance_path.display()
             );
         }
         Ok(())
     })?;
 
-    // Create hashmap from family name to instance file
+    // Create hashmap from family name to taken instance file
     let mut family_to_instance: HashMap<String, PathBuf> = HashMap::new();
-    for entry in fs::read_dir(&args.instances)? {
+    for entry in fs::read_dir(taken_instances_dir)? {
         let entry = entry?;
         if let Some(stem) = entry.path().file_stem() {
             let family_name = stem.to_string_lossy().to_string();
-            family_to_instance.insert(family_name, entry.path().clone());
+            if !family_name.starts_with("inst-") {
+                family_to_instance.insert(family_name, entry.path().to_path_buf());
+            }
         }
     }
-    //debug!("family_to_instance {family_to_instance:#?}");
-    debug!("Finished instance selection in {:?}", now.elapsed());
-    panic!();
 
-    // Create a file to move the consensi that have instances
+    debug!(
+        "family_to_instance has {} members",
+        family_to_instance.len()
+    );
+    debug!("Finished instance selection in {:?}", now.elapsed());
+
+    // Create a new consensi file containing only the families that have instances
     let taken_consensi_path = args.outdir.join("consensi.fa");
     let mut out_consensi = open_for_write(&taken_consensi_path)?;
     let mut reader = parse_reader(open(&args.consensi)?)?;
@@ -1033,27 +1030,6 @@ fn check_family_instances(args: &Args) -> Result<(PathBuf, HashMap<String, PathB
         );
     }
 
-    let mut consensi_names: Vec<String> = consensi_names.keys().cloned().collect();
-    consensi_names.sort();
-    //debug!("consensi_names {consensi_names:#?}");
-
-    let instance_names: HashSet<String> = family_to_instance.keys().cloned().collect();
-    //debug!("instance_names {instance_names:#?}");
-
-    let missing_instances: Vec<_> = consensi_names
-        .into_iter()
-        .filter(|name| !instance_names.contains(name))
-        .collect();
-
-    if !missing_instances.is_empty() {
-        // This was a fatal error, but Travis and Robert say that
-        // we should skip families that have no instances.
-        debug!(
-            "Missing the following instances: {}",
-            missing_instances.iter().join(", ")
-        );
-    }
-
     Ok((taken_consensi_path, family_to_instance))
 }
 
@@ -1063,10 +1039,27 @@ fn select_instances(
     family_name: &str,
     from_path: &PathBuf,
     to_path: &PathBuf,
+    working_dir: &Path,
     args: &Args,
 ) -> Result<usize> {
-    let blast_dir = args.outdir.join("select").join(family_name);
+    let blast_dir = working_dir.join(family_name);
     fs::create_dir_all(&blast_dir)?;
+
+    if to_path.is_file() {
+        let mut reader = FastaReader::new(open(to_path)?);
+        let num = reader.records().count();
+        if num < MIN_NUM_INSTANCES {
+            debug!(
+                "Removing previous instance file {}, too few ({num})",
+                to_path.display()
+            );
+            fs::remove_file(to_path)?;
+            return Ok(0);
+        } else {
+            debug!("Reusing existing instance file: {}", to_path.display());
+            return Ok(num);
+        }
+    }
 
     // Extract the family's consensus sequence
     let subject_path: PathBuf = {
@@ -1181,15 +1174,27 @@ fn select_instances(
             .all(|val| *val >= MIN_CONSENSUS_COVERAGE);
     }
 
-    let mut reader = FastaReader::new(BufReader::new(open(from_path)?));
-    let mut fasta_writer = FastaWriter::new(BufWriter::new(open_for_write(to_path)?));
     let mut num_taken = 0;
-    for record in reader.records().map_while(Result::ok) {
-        let name = String::from_utf8(record.name().to_vec())?;
-        if wanted.contains(&name) {
-            fasta_writer.write_record(&record)?;
-            num_taken += 1;
+    if !wanted.is_empty() {
+        let mut reader = FastaReader::new(BufReader::new(open(from_path)?));
+        let mut fasta_writer =
+            FastaWriter::new(BufWriter::new(open_for_write(to_path)?));
+        for record in reader.records().map_while(Result::ok) {
+            let name = String::from_utf8(record.name().to_vec())?;
+            if wanted.contains(&name) {
+                fasta_writer.write_record(&record)?;
+                num_taken += 1;
+            }
         }
+    }
+
+    // Be sure to remove any empty files
+    if num_taken < MIN_NUM_INSTANCES && to_path.exists() {
+        debug!("Removing family '{family_name}', too few instances ({num_taken})");
+        fs::remove_file(to_path)?;
+        num_taken = 0;
+    } else {
+        debug!("Took {num_taken} instances for {family_name}");
     }
 
     Ok(num_taken)
@@ -1199,36 +1204,17 @@ fn select_instances(
 fn downsample(
     fasta: &PathBuf,
     num_wanted: usize,
-    upper_range: usize,
     mut output: impl Write,
 ) -> Result<usize> {
     let mut reader = parse_reader(open(fasta)?)?;
-    let mut rng = rand::rng();
-    let range: Vec<usize> = (0..upper_range).collect();
-    let mut take: Vec<usize> = range
-        .choose_multiple(&mut rng, num_wanted)
-        .cloned()
-        .collect();
-    take.sort();
-    take.reverse();
-
-    let mut next_take = take.pop().unwrap();
-    let mut i = 0;
     let mut num_taken = 0;
 
     while let Some(rec) = reader.iter_record()? {
-        if i == next_take {
-            writeln!(output, ">{}{}\n{}", rec.head(), rec.des(), rec.seq())?;
-            num_taken += 1;
-            match take.pop() {
-                // Keep skipping until we get to the next take value
-                Some(val) => next_take = val,
-
-                // We've run out of take values, so leave the loop
-                _ => break,
-            }
+        if num_taken == num_wanted {
+            break;
         }
-        i += 1;
+        writeln!(output, ">{}{}\n{}", rec.head(), rec.des(), rec.seq())?;
+        num_taken += 1;
     }
 
     Ok(num_taken)
@@ -1416,7 +1402,13 @@ fn merge_families(
     let f1 = fams1.join("::");
     let f2 = fams2.join("::");
     let new_family_name = format!("{f1}::{f2}");
-    let new_family_path = args.instances_dir.join(format!("{new_family_name}.fa"));
+    let new_family_path = tempfile::Builder::new()
+        .prefix("inst-")
+        .suffix(".fa")
+        .keep(true)
+        .tempfile_in(args.taken_instances_dir)?
+        .path()
+        .to_path_buf();
 
     debug!(
         "Merging {num_from1} from {f1}, {num_from2} from {f2} => {}",
@@ -1431,7 +1423,7 @@ fn merge_families(
             let fasta = family_to_instance
                 .get(fam)
                 .unwrap_or_else(|| panic!("Missing instances for family '{fam}'"));
-            total_taken += downsample(fasta, *num, num_seqs_total, &mut output)?;
+            total_taken += downsample(fasta, *num, &mut output)?;
         }
 
         if total_taken == 0 {
@@ -1540,6 +1532,15 @@ fn open_for_write(filename: &PathBuf) -> Result<Box<dyn Write>> {
 }
 
 // --------------------------------------------------
+fn read_lines(path: &PathBuf) -> Result<Vec<String>> {
+    Ok(open(path)?
+        .lines()
+        .map_while(Result::ok)
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
+// --------------------------------------------------
 fn parse_newick(val: &str) -> Vec<String> {
     let mut ret = vec![];
     match newick::from_string(val) {
@@ -1571,8 +1572,7 @@ mod tests {
     use super::{
         bitscore_to_confidence, call_winners, cat_sequences, downsample,
         extract_scores, find_independence, format_seconds, independence,
-        number_consensi, open, parse_blast_divergence, parse_newick, Independence,
-        StringPair, Winners,
+        number_consensi, open, parse_newick, Independence, StringPair, Winners,
     };
     use anyhow::Result;
     use kseq::parse_reader;
@@ -1736,7 +1736,7 @@ mod tests {
             let out = File::create(&outpath)?;
 
             // Select 3 of the 5 sequences
-            let res = downsample(&fasta, 3, 5, &out);
+            let res = downsample(&fasta, 3, &out);
             assert!(res.is_ok());
             assert_eq!(res.unwrap(), 3);
         }
@@ -1757,7 +1757,7 @@ mod tests {
         // Should only get the actual 5
         {
             let out = File::create(&outpath)?;
-            let res = downsample(&fasta, 10, 5, &out);
+            let res = downsample(&fasta, 10, &out);
             assert!(res.is_ok());
             assert_eq!(res.unwrap(), 5);
         }
