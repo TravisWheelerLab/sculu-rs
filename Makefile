@@ -36,6 +36,7 @@ mix:
 tua:
 	./target/release/sculu \
         --align-matrix $(MATRIX) \
+		--build-components-only \
         --outdir    ~/wheelerlab/tuatara/sculu-out \
         --instances ~/wheelerlab/tuatara/instances \
         --consensi  ~/wheelerlab/tuatara/consensi.fa \

@@ -65,6 +65,10 @@ pub struct Args {
     #[arg(long, value_name = "OUTFILE", default_value = "families.fa")]
     pub outfile: PathBuf,
 
+    /// Stop after building components
+    #[arg(long, conflicts_with = "components")]
+    pub build_components_only: bool,
+
     /// Lambda value
     #[arg(long, value_name = "LAMBDA", default_value = "0.1227")]
     pub lambda: f64,
@@ -261,6 +265,10 @@ pub fn run(args: Args) -> Result<()> {
     } else {
         // This will only BLAST if there are no components from a previous run
         let components = align_consensi_to_self(&consensi_file, &args)?;
+
+        if args.build_components_only {
+            return Ok(())
+        }
 
         let mut fasta_writer =
             FastaWriter::new(BufWriter::new(open_for_write(&args.outfile)?));
@@ -1042,9 +1050,6 @@ fn select_instances(
     working_dir: &Path,
     args: &Args,
 ) -> Result<usize> {
-    let blast_dir = working_dir.join(family_name);
-    fs::create_dir_all(&blast_dir)?;
-
     if to_path.is_file() {
         let mut reader = FastaReader::new(open(to_path)?);
         let num = reader.records().count();
@@ -1060,6 +1065,9 @@ fn select_instances(
             return Ok(num);
         }
     }
+
+    let blast_dir = working_dir.join(family_name);
+    fs::create_dir_all(&blast_dir)?;
 
     // Extract the family's consensus sequence
     let subject_path: PathBuf = {
