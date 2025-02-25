@@ -31,16 +31,25 @@ mix:
 		--outfile    final-mixed.fa \
 		--align-matrix $(MATRIX)
 
-# cargo run -- \
 
-tua:
-	./target/release/sculu \
+tua1:
+	cargo run -- \
         --align-matrix $(MATRIX) \
 		--build-components-only \
-        --outdir    ~/wheelerlab/tuatara/sculu-out \
-        --instances ~/wheelerlab/tuatara/instances \
-        --consensi  ~/wheelerlab/tuatara/consensi.fa \
-        --outfile   ~/wheelerlab/tuatara/new-consensi.fa
+        --outdir    tuatara-out \
+        --outfile   tuatara-out/new-consensi.fa \
+        --instances data/tuatara/instances \
+        --consensi  data/tuatara/consensi.fa
+
+tua2:
+	cargo run -- \
+        --align-matrix $(MATRIX) \
+        --outdir       tuatara-out \
+		--logfile      - \
+        --outfile      tuatara-out/new-consensi.fa \
+        --component    tuatara-out/components/component-0 \
+        --instances    data/tuatara/instances \
+        --consensi     data/tuatara/consensi.fa
 
 clean:
 	rm -rf RM_* makedb.log

@@ -2,7 +2,7 @@ mod graph;
 
 use anyhow::{anyhow, bail, Result};
 use chrono::Duration;
-use clap::{builder::PossibleValue, Parser, ValueEnum};
+use clap::Parser;
 use csv::{ReaderBuilder, WriterBuilder};
 use itertools::Itertools;
 use kseq::parse_reader;
@@ -38,13 +38,6 @@ const MIN_NUM_INSTANCES: usize = 10;
 #[derive(Debug, Parser)]
 #[command(version, about)]
 pub struct Args {
-    #[arg(
-        value_name = "COMMAND",
-        value_parser(clap::value_parser!(Command)),
-        default_value = "all"
-    )]
-    pub command: Command,
-
     /// FASTA file of subfamily consensi
     #[arg(long, value_name = "CONSENSI", required = true)]
     pub consensi: PathBuf,
@@ -54,8 +47,8 @@ pub struct Args {
     pub instances: PathBuf,
 
     /// Components file from "cluster" action
-    #[arg(long, value_name = "COMPONENTS")]
-    pub components: Option<PathBuf>,
+    #[arg(long, value_name = "COMPONENT")]
+    pub component: Option<PathBuf>,
 
     /// Output directory
     #[arg(long, value_name = "OUTDIR")]
@@ -65,8 +58,12 @@ pub struct Args {
     #[arg(long, value_name = "OUTFILE", default_value = "families.fa")]
     pub outfile: PathBuf,
 
+    /// Log output
+    #[arg(long, value_name = "LOGFILE")]
+    pub logfile: Option<String>,
+
     /// Stop after building components
-    #[arg(long, conflicts_with = "components")]
+    #[arg(long, conflicts_with = "component")]
     pub build_components_only: bool,
 
     /// Lambda value
@@ -89,7 +86,7 @@ pub struct Args {
     #[arg(long, value_name = "THREADS")]
     pub num_threads: Option<usize>,
 
-    /// PERL5LIB, e.g., to find RepeatMasker/RepeatModeler
+    /// PERL5LIB, location of RepeatMasker/RepeatModeler
     #[arg(long, value_name = "PERL5LIB")]
     pub perl5lib: Option<String>,
 
@@ -130,32 +127,10 @@ pub struct Args {
     pub align_min_raw_gapped_score: i64,
 }
 
-#[derive(PartialEq, Parser, Debug, Clone, Default)]
-pub enum Command {
-    #[default]
-    All,
-    Cluster,
-    Merge,
-}
-
 #[derive(Debug, PartialEq)]
 enum Partition {
     Top,
     Bottom,
-}
-
-impl ValueEnum for Command {
-    fn value_variants<'a>() -> &'a [Self] {
-        &[Command::All, Command::Cluster, Command::Merge]
-    }
-
-    fn to_possible_value<'a>(&self) -> Option<PossibleValue> {
-        Some(match self {
-            Command::All => PossibleValue::new("all"),
-            Command::Cluster => PossibleValue::new("cluster"),
-            Command::Merge => PossibleValue::new("merge"),
-        })
-    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -235,11 +210,19 @@ pub fn run(args: Args) -> Result<()> {
     //    .target(env_logger::Target::Stdout)
     //    .init();
 
+    let log_file = args
+        .logfile
+        .clone()
+        .unwrap_or(args.outdir.join("debug.log").to_string_lossy().to_string());
+
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Debug)
-        .target(env_logger::Target::Pipe(Box::new(BufWriter::new(
-            File::create(args.outdir.join("debug.log"))?,
-        ))))
+        .target(match log_file.as_str() {
+            "-" => env_logger::Target::Stdout,
+            path => env_logger::Target::Pipe(Box::new(BufWriter::new(
+                File::create(path).map_err(|e| anyhow!("{path}: {e}"))?,
+            ))),
+        })
         .init();
 
     let taken_instances_dir = args.outdir.join("instances");
@@ -247,9 +230,9 @@ pub fn run(args: Args) -> Result<()> {
 
     let (consensi_file, family_to_instance) =
         check_family_instances(&args, &taken_instances_dir)?;
-    //debug!("family_to_instance = '{family_to_instance:#?}'");
+    debug!("family_to_instance = '{family_to_instance:#?}'");
 
-    if let Some(ref component_file) = args.components {
+    if let Some(ref component_file) = args.component {
         let merged = merge_component(
             component_file,
             &consensi_file,
@@ -265,9 +248,10 @@ pub fn run(args: Args) -> Result<()> {
     } else {
         // This will only BLAST if there are no components from a previous run
         let components = align_consensi_to_self(&consensi_file, &args)?;
+        debug!("{components:?}");
 
         if args.build_components_only {
-            return Ok(())
+            return Ok(());
         }
 
         let mut fasta_writer =
@@ -357,7 +341,8 @@ pub fn align_consensi_to_self(consensi: &Path, args: &Args) -> Result<Components
 
         let width = multis.len().to_string().len();
         for (num, component) in multis.iter().enumerate() {
-            let component_path = components_dir.join(format!("component-{num:0width$}"));
+            let component_path =
+                components_dir.join(format!("component-{num:0width$}"));
             let mut file = open_for_write(&component_path)?;
             writeln!(file, "{}", component.join("\n"))?;
         }
