@@ -38,8 +38,8 @@ tua1:
 		--build-components-only \
         --outdir    tuatara-out \
         --outfile   tuatara-out/new-consensi.fa \
-        --instances data/tuatara/instances \
-        --consensi  data/tuatara/consensi.fa
+        --instances ~/wheelerlab/tuatara/instances \
+        --consensi  ~/wheelerlab/tuatara/consensi.fa
 
 tua2:
 	cargo run -- \

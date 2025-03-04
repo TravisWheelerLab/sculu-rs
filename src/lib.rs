@@ -19,7 +19,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp,
-    cmp::max,
+    cmp::{max, min},
     collections::{HashMap, HashSet},
     fmt,
     fs::{self, File},
@@ -33,6 +33,8 @@ const MIN_INSTANCE_SEQUENCE_LENGTH: usize = 30;
 const MIN_CONSENSUS_COVERAGE: usize = 5;
 const MAX_NUM_INSTANCES: usize = 100;
 const MIN_NUM_INSTANCES: usize = 10;
+const MIN_LEN_SIMILARITY: f64 = 0.9;
+const MIN_ALIGN_COVER: f64 = 0.9;
 
 /// SCULU subfamily clustering tool
 #[derive(Debug, Parser)]
@@ -145,6 +147,17 @@ struct RmBlastOutput {
     subject_start: usize,
     subject_end: usize,
     cpg_kdiv: f64,
+    pident: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+struct FilteredConsensusPair {
+    target: String,
+    query: String,
+    pident: f64,
+    subject_coverage: f64,
+    query_coverage: f64,
+    is_flipped: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -169,6 +182,17 @@ pub struct Components {
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 struct StringPair(String, String);
+
+impl StringPair {
+    pub fn new(s1: String, s2: String) -> StringPair {
+        // Store the strings in ascending order
+        if s1 < s2 {
+            StringPair(s1, s2)
+        } else {
+            StringPair(s2, s1)
+        }
+    }
+}
 
 impl fmt::Display for StringPair {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -326,8 +350,57 @@ pub fn align_consensi_to_self(consensi: &Path, args: &Args) -> Result<Components
         debug!("Reusing existing component files");
     } else {
         let blast_dir = args.outdir.join("consensi_cluster");
-        let output = run_rmblastn(&blast_dir, args, consensi, consensi)?;
-        let mut components = graph::connected_components(parse_alignment(&output)?);
+        let blast_out = run_rmblastn(&blast_dir, args, consensi, consensi)?;
+
+        // Filter out: Hits to self, insufficient coverage
+        // Also, write out if the pair was flipped
+        let filtered_file = blast_dir.join("filtered.tsv");
+        let mut filtered_wtr = WriterBuilder::new()
+            .has_headers(true)
+            .delimiter(b'\t')
+            .from_path(&filtered_file)?;
+
+        let mut reader = ReaderBuilder::new()
+            .delimiter(b'\t')
+            .has_headers(false)
+            .from_path(blast_out)?;
+
+        let mut records = vec![];
+        for res in reader.records() {
+            let record: RmBlastOutput = res?.deserialize(None)?;
+            if record.query == record.target {
+                continue;
+            }
+
+            // The coverage of the hits to either the query or subject must
+            // be at least half of the sequence length.
+            let query_span = 1 + record.query_end.abs_diff(record.query_start);
+            let subject_span = 1 + record.subject_end.abs_diff(record.subject_start);
+            let query_coverage = query_span as f64 / record.query_len as f64;
+            let subject_coverage = subject_span as f64 / record.subject_len as f64;
+            let equiv_len = min(query_span, subject_span) as f64
+                >= (MIN_LEN_SIMILARITY * max(query_span, subject_span) as f64);
+
+            if query_coverage >= MIN_ALIGN_COVER
+                && subject_coverage >= MIN_ALIGN_COVER
+                && equiv_len
+            {
+                filtered_wtr.serialize(FilteredConsensusPair {
+                    target: record.target.to_string(),
+                    query: record.query.clone(),
+                    subject_coverage,
+                    query_coverage,
+                    pident: record.pident,
+                    is_flipped: (record.query_start > record.query_end)
+                        || (record.subject_start > record.subject_end),
+                })?;
+
+                records.push(record);
+            }
+
+        }
+
+        let mut components = graph::connected_components(records);
         components.sort_by_key(|v| v.len());
 
         let (singles, multis) =
@@ -493,7 +566,7 @@ fn merge_component(
         let mut score_lookup: HashMap<StringPair, f64> = HashMap::new();
         for pair in &pair_independence {
             score_lookup.insert(
-                StringPair(pair.f1.to_string(), pair.f2.to_string()),
+                StringPair::new(pair.f1.to_string(), pair.f2.to_string()),
                 pair.val,
             );
         }
@@ -523,7 +596,7 @@ fn merge_component(
             let fams1 = parse_newick(&pair.f1);
             let fams2 = parse_newick(&pair.f2);
 
-            // All the family names in this merge
+            // Collect all the family names involved in this merge
             let mut all_families: Vec<_> = fams1.clone();
             for f2 in &fams2 {
                 all_families.push(f2.clone());
@@ -545,7 +618,7 @@ fn merge_component(
             // to greater, so this A/B merge "val" will be lower than the
             // symmetrical B/A score.
             let other_score = score_lookup
-                .get(&StringPair(pair.f2.to_string(), pair.f1.to_string()))
+                .get(&StringPair::new(pair.f2.to_string(), pair.f1.to_string()))
                 .map_or("".to_string(), |v| format!("/{v:0.04}"));
 
             debug!(
@@ -659,7 +732,7 @@ fn run_rmblastn(
     query: &Path,
 ) -> Result<PathBuf> {
     fs::create_dir_all(outdir)?;
-    let outfile = outdir.join("blast.out");
+    let outfile = outdir.join("blast.tsv");
 
     if outfile.exists() {
         debug!("Reusing previous BLAST output file '{}'", outfile.display());
@@ -694,7 +767,7 @@ fn run_rmblastn(
             "-out".to_string(),
             outfile.to_string_lossy().to_string(),
             "-outfmt".to_string(),
-            "6 score qseqid sseqid qlen qstart qend slen sstart send cpg_kdiv"
+            "6 score qseqid sseqid qlen qstart qend slen sstart send cpg_kdiv pident"
                 .to_string(),
             "-num_threads".to_string(),
             args.num_threads.unwrap_or(num_cpus::get()).to_string(),
@@ -879,7 +952,7 @@ fn call_winners(
             // Even though this is a duplication of the data
             for pair in winning_set.into_iter().permutations(2) {
                 if let [&f1, &f2] = pair[..] {
-                    let key = StringPair(f1.to_string(), f2.to_string());
+                    let key = StringPair::new(f1.to_string(), f2.to_string());
                     winning_sets.entry(key).and_modify(|v| *v += 1).or_insert(1);
                 }
             }
@@ -1055,8 +1128,8 @@ fn select_instances(
     fs::create_dir_all(&blast_dir)?;
 
     // Extract the family's consensus sequence
-    let subject_path: PathBuf = {
-        let db_path = blast_dir.join("db.fa");
+    let db_path = blast_dir.join("db.fa");
+    if !db_path.exists() {
         let mut writer = FastaWriter::new(BufWriter::new(open_for_write(&db_path)?));
         let num_taken =
             copy_fasta(&[family_name.to_string()], consensi_path, &mut writer)?;
@@ -1067,11 +1140,10 @@ fn select_instances(
                 consensi_path.display()
             );
         }
-        db_path
-    };
+    }
 
     // Get the length of the consensus
-    let mut reader = FastaReader::new(open(&subject_path)?);
+    let mut reader = FastaReader::new(open(&db_path)?);
     let consensus_len = reader
         .records()
         .next()
@@ -1079,7 +1151,7 @@ fn select_instances(
         .map(|rec| rec.sequence().len())?;
 
     // BLAST the instances to the consensus
-    let blast_out = run_rmblastn(&blast_dir, args, &subject_path, from_path)?;
+    let blast_out = run_rmblastn(&blast_dir, args, &db_path, from_path)?;
     let alignments = parse_alignment(&blast_out)?;
 
     // Remove short alignments, find the highest score for each hit
@@ -1351,7 +1423,7 @@ fn independence(winners: Winners) -> Vec<Independence> {
     for pair in families.into_iter().permutations(2) {
         if let [f1, f2] = pair[..] {
             let num_wins = *winners.clear_winners.get(f1).unwrap_or(&0);
-            let key = StringPair(f1.to_string(), f2.to_string());
+            let key = StringPair::new(f1.to_string(), f2.to_string());
             let &num_shared = winners.winning_sets.get(&key).unwrap_or(&0u32);
             let ind = find_independence(num_wins, num_shared);
 
@@ -1981,6 +2053,7 @@ mod tests {
                 subject_start: 63,
                 subject_end: 102,
                 cpg_kdiv: 0.2,
+                pident: 0.0,
             }
         );
 

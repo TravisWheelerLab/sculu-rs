@@ -6,20 +6,13 @@ use petgraph::{
         EdgeRef, IntoEdgeReferences, IntoNodeReferences, NodeCompactIndexable, NodeRef,
     },
 };
-use std::{
-    cmp::{max, min},
-    collections::HashMap,
-};
-
-// Make parameters?
-const MIN_LEN_SIMILARITY: f64 = 0.9;
-const MIN_ALIGN_COVER: f64 = 0.9;
+use std:: collections::HashMap;
 
 // --------------------------------------------------
 /// Given a slice of `RmBlastOutput` records, get the connected components
 /// of a graph where edges are created between sequences that have been aligned.
 ///
-/// The components are returned as `Vec<Vec<&str>>`, where each inner `Vec`
+/// The components are returned as `Vec<Vec<String>>`, where each inner `Vec`
 /// contains the names of the sequences in the component.
 pub fn connected_components(records: Vec<RmBlastOutput>) -> Vec<Vec<String>> {
     let mut seq_to_id: HashMap<String, usize> = HashMap::new();
@@ -37,28 +30,13 @@ pub fn connected_components(records: Vec<RmBlastOutput>) -> Vec<Vec<String>> {
         }
     });
 
-
     let edges: Vec<_> = records
         .iter()
-        .filter(|record| record.query != record.target)
-        .filter_map(|record| {
-            // The coverage of the hits to either the query or subject must
-            // be at least half of the sequence length.
-            let query_span = 1 + record.query_end.abs_diff(record.query_start);
-            let subject_span = 1 + record.subject_end.abs_diff(record.subject_start);
-            let query_covered =
-                (query_span as f64 / record.query_len as f64) >= MIN_ALIGN_COVER;
-            let subject_covered =
-                (subject_span as f64 / record.subject_len as f64) >= MIN_ALIGN_COVER;
-            let equiv_len = min(query_span, subject_span) as f64
-                >= (MIN_LEN_SIMILARITY * max(query_span, subject_span) as f64);
-
-            (query_covered && subject_covered && equiv_len).then(|| {
-                (
-                    *seq_to_id.get(&record.query).unwrap(),
-                    *seq_to_id.get(&record.target).unwrap(),
-                )
-            })
+        .map(|record| {
+            (
+                *seq_to_id.get(&record.query).unwrap(),
+                *seq_to_id.get(&record.target).unwrap(),
+            )
         })
         .collect();
 
