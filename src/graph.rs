@@ -87,19 +87,19 @@ mod graph_tests {
     fn test_connected_components() -> Result<()> {
         let path = PathBuf::from("./tests/inputs/blast-consensi-self.tsv");
         let alignments = parse_alignment(&path)?;
-        assert_eq!(alignments.len(), 100);
+        assert_eq!(alignments.len(), 1000);
 
         let mut components = connected_components(alignments);
         components.sort_by_key(|v| v.len());
 
-        // Two alignments were excluded by the filters
-        assert_eq!(components.iter().map(|c| c.len()).sum::<usize>(), 98);
+        // Some alignments were excluded by the filters
+        assert_eq!(components.iter().map(|c| c.len()).sum::<usize>(), 448);
 
-        // There are 47 groups
-        assert_eq!(components.len(), 47);
+        // There are 4 groups
+        assert_eq!(components.len(), 4);
 
-        // The largest group has 46 members
-        assert_eq!(components.last().unwrap().len(), 46);
+        // The largest group has 444 members
+        assert_eq!(components.last().unwrap().len(), 444);
 
         Ok(())
     }

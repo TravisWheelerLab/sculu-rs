@@ -1,6 +1,7 @@
 mod graph;
 
 use anyhow::{anyhow, bail, Result};
+use bio::alphabets::dna::revcomp;
 use chrono::Duration;
 use clap::Parser;
 use csv::{ReaderBuilder, WriterBuilder};
@@ -135,7 +136,7 @@ enum Partition {
     Bottom,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 struct RmBlastOutput {
     score: usize,
     target: String,
@@ -151,13 +152,18 @@ struct RmBlastOutput {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-struct FilteredConsensusPair {
+struct AlignedConsensusPair {
     target: String,
     query: String,
-    pident: f64,
-    subject_coverage: f64,
-    query_coverage: f64,
     is_flipped: bool,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+enum Direction {
+    #[serde(rename = "forward")]
+    Forward,
+    #[serde(rename = "reverse")]
+    Reverse,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -180,7 +186,7 @@ pub struct Components {
     components: Vec<PathBuf>,
 }
 
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct StringPair(String, String);
 
 impl StringPair {
@@ -215,6 +221,7 @@ struct MergeFamilies<'a> {
     num_threads: usize,
     refiner: &'a Option<String>,
     perl5lib: &'a Option<String>,
+    flipped: bool,
 }
 
 // --------------------------------------------------
@@ -228,11 +235,6 @@ pub fn run(args: Args) -> Result<()> {
             bail!("--align-matrix '{}' does not exist", path.display());
         }
     }
-
-    //env_logger::Builder::new()
-    //    .filter_level(log::LevelFilter::Debug)
-    //    .target(env_logger::Target::Stdout)
-    //    .init();
 
     let log_file = args
         .logfile
@@ -254,7 +256,7 @@ pub fn run(args: Args) -> Result<()> {
 
     let (consensi_file, family_to_instance) =
         check_family_instances(&args, &taken_instances_dir)?;
-    debug!("family_to_instance = '{family_to_instance:#?}'");
+    //debug!("family_to_instance = '{family_to_instance:#?}'");
 
     if let Some(ref component_file) = args.component {
         let merged = merge_component(
@@ -272,7 +274,6 @@ pub fn run(args: Args) -> Result<()> {
     } else {
         // This will only BLAST if there are no components from a previous run
         let components = align_consensi_to_self(&consensi_file, &args)?;
-        debug!("{components:?}");
 
         if args.build_components_only {
             return Ok(());
@@ -352,55 +353,45 @@ pub fn align_consensi_to_self(consensi: &Path, args: &Args) -> Result<Components
         let blast_dir = args.outdir.join("consensi_cluster");
         let blast_out = run_rmblastn(&blast_dir, args, consensi, consensi)?;
 
+        // There may be multiple hits per pair, take highest
+        let best_alignments = blast_dir.join("best.tsv");
+        take_best_alignments(&blast_out, &best_alignments)?;
+
         // Filter out: Hits to self, insufficient coverage
-        // Also, write out if the pair was flipped
-        let filtered_file = blast_dir.join("filtered.tsv");
-        let mut filtered_wtr = WriterBuilder::new()
+        let alignment_file = components_dir.join("alignment.tsv");
+        let mut alignment_wtr = WriterBuilder::new()
             .has_headers(true)
             .delimiter(b'\t')
-            .from_path(&filtered_file)?;
+            .from_path(&alignment_file)?;
 
         let mut reader = ReaderBuilder::new()
             .delimiter(b'\t')
-            .has_headers(false)
-            .from_path(blast_out)?;
+            .has_headers(true)
+            .from_path(best_alignments)?;
 
         let mut records = vec![];
         for res in reader.records() {
             let record: RmBlastOutput = res?.deserialize(None)?;
-            if record.query == record.target {
-                continue;
-            }
-
-            // The coverage of the hits to either the query or subject must
-            // be at least half of the sequence length.
-            let query_span = 1 + record.query_end.abs_diff(record.query_start);
-            let subject_span = 1 + record.subject_end.abs_diff(record.subject_start);
-            let query_coverage = query_span as f64 / record.query_len as f64;
-            let subject_coverage = subject_span as f64 / record.subject_len as f64;
-            let equiv_len = min(query_span, subject_span) as f64
-                >= (MIN_LEN_SIMILARITY * max(query_span, subject_span) as f64);
-
-            if query_coverage >= MIN_ALIGN_COVER
-                && subject_coverage >= MIN_ALIGN_COVER
-                && equiv_len
-            {
-                filtered_wtr.serialize(FilteredConsensusPair {
-                    target: record.target.to_string(),
-                    query: record.query.clone(),
-                    subject_coverage,
-                    query_coverage,
-                    pident: record.pident,
-                    is_flipped: (record.query_start > record.query_end)
-                        || (record.subject_start > record.subject_end),
-                })?;
-
-                records.push(record);
-            }
-
+            let query_dir = if record.query_start < record.query_end {
+                Direction::Forward
+            } else {
+                Direction::Reverse
+            };
+            let subject_dir = if record.subject_start < record.subject_end {
+                Direction::Forward
+            } else {
+                Direction::Reverse
+            };
+            alignment_wtr.serialize(AlignedConsensusPair {
+                target: record.target.to_string(),
+                query: record.query.clone(),
+                is_flipped: query_dir != subject_dir,
+            })?;
+            records.push(record);
         }
 
         let mut components = graph::connected_components(records);
+        // Sort by size of component group ascending
         components.sort_by_key(|v| v.len());
 
         let (singles, multis) =
@@ -434,6 +425,7 @@ pub fn align_consensi_to_self(consensi: &Path, args: &Args) -> Result<Components
             components.push((file_name, path))
         }
     }
+
     // Sort by name, and the files are named in order of increasing size
     components.sort_by_key(|t| t.0.clone());
 
@@ -441,6 +433,67 @@ pub fn align_consensi_to_self(consensi: &Path, args: &Args) -> Result<Components
         singletons,
         components: components.into_iter().map(|(_name, path)| path).collect(),
     })
+}
+
+// --------------------------------------------------
+fn take_best_alignments(blast_out: &PathBuf, output: &PathBuf) -> Result<()> {
+    let now = Instant::now();
+
+    if fs::metadata(&output).map_or(0, |meta| meta.len()) > 0 {
+        debug!("Reusing best alignments '{}'", output.display());
+    } else {
+        debug!("Taking best alignments from '{}'", blast_out.display());
+        let mut reader = ReaderBuilder::new()
+            .delimiter(b'\t')
+            .has_headers(false)
+            .from_path(blast_out)?;
+
+        let mut writer = WriterBuilder::new()
+            .has_headers(true)
+            .delimiter(b'\t')
+            .from_path(output)?;
+
+        let mut taken = HashMap::<StringPair, RmBlastOutput>::new();
+        for res in reader.records() {
+            let record: RmBlastOutput = res?.deserialize(None)?;
+
+            if record.query == record.target {
+                continue;
+            }
+
+            // The coverage of the hits to either the query or subject must
+            // be at least half of the sequence length.
+            let query_span = 1 + record.query_end.abs_diff(record.query_start);
+            let subject_span = 1 + record.subject_end.abs_diff(record.subject_start);
+            let query_coverage = query_span as f64 / record.query_len as f64;
+            let subject_coverage = subject_span as f64 / record.subject_len as f64;
+            let equiv_len = min(query_span, subject_span) as f64
+                >= (MIN_LEN_SIMILARITY * max(query_span, subject_span) as f64);
+
+            if query_coverage >= MIN_ALIGN_COVER
+                && subject_coverage >= MIN_ALIGN_COVER
+                && equiv_len
+            {
+                let pair = StringPair(record.query.clone(), record.target.clone());
+
+                if let Some(val) = taken.get_mut(&pair) {
+                    if val.score > record.score {
+                        *val = record.clone();
+                    }
+                } else {
+                    taken.insert(pair, record.clone());
+                }
+            }
+        }
+
+        for record in taken.values() {
+            writer.serialize(record)?;
+        }
+
+        debug!("Wrote to '{}' in {:?}", output.display(), now.elapsed());
+    }
+
+    Ok(())
 }
 
 // --------------------------------------------------
@@ -473,6 +526,29 @@ fn merge_component(
 ) -> Result<PathBuf> {
     // The "component-N" file will contain the names of the families
     let families = read_lines(&component_file.to_path_buf())?;
+    dbg!(&families);
+
+    // Get the alignments underlying this component
+    let component_dir = component_file.parent().expect("Failed to get parent dir");
+    let alignment_path = component_dir.join("alignment.tsv");
+    let mut alignment_reader = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(true)
+        .from_path(alignment_path)?;
+
+    let mut flipped_pairs: HashSet<StringPair> = HashSet::new();
+    for res in alignment_reader.records() {
+        let record: AlignedConsensusPair = res?.deserialize(None)?;
+        if record.is_flipped
+            && (families.contains(&record.target) || families.contains(&record.query))
+        {
+            let pair = StringPair::new(record.target.clone(), record.query.clone());
+            if !flipped_pairs.contains(&pair) {
+                flipped_pairs.insert(pair);
+            }
+        }
+    }
+    dbg!(&flipped_pairs);
 
     // Create a working dir with the same name as the component file
     let component_name = component_file
@@ -493,18 +569,20 @@ fn merge_component(
     let start = Instant::now();
 
     // Create a consensi file for this round containing only the given families
-    let mut consensi = batch_dir.join("consensi.fa");
+    dbg!(&batch_dir);
+    let mut batch_consensi = batch_dir.join("consensi.fa");
     {
         // Scoped to cause fasta_writer to close
         let mut fasta_writer =
-            FastaWriter::new(BufWriter::new(open_for_write(&consensi)?));
+            FastaWriter::new(BufWriter::new(open_for_write(&batch_consensi)?));
         let num_taken =
             copy_fasta(&families, &consensi_file.to_path_buf(), &mut fasta_writer)?;
 
         if num_taken == 0 {
             bail!(
-                "Failed to copy consensi sequences to '{}'",
-                consensi_file.display()
+                "Failed to copy consensi sequences from '{}' to '{}'",
+                consensi_file.display(),
+                batch_consensi.display()
             );
         }
     }
@@ -530,8 +608,8 @@ fn merge_component(
     // and move the family names to the description.
     let consensi_path = round0_dir.join("consensi.fa");
     debug!("Writing numbered consensi to '{}'", consensi_path.display());
-    let mut consensi_seqs = number_consensi(&consensi, &consensi_path)?;
-    consensi = consensi_path;
+    let mut consensi_seqs = number_consensi(&batch_consensi, &consensi_path)?;
+    batch_consensi = consensi_path;
 
     // Start merging
     let trailing_semi = Regex::new(";$").unwrap();
@@ -544,14 +622,15 @@ fn merge_component(
         // Align all the sequences to the current consensi.
         // On the first round, all the original consensi will be included.
         // On future rounds, only the newly merged consensi will be present.
-        let alignment_file = run_rmblastn(&round_dir, args, &consensi, all_seqs_path)?;
+        let alignment_file =
+            run_rmblastn(&round_dir, args, &batch_consensi, all_seqs_path)?;
 
         // Extract the scores from the alignment file.
         // On the first round, there will be no "prev_scores" file.
         // On the following rounds, the previous round's scores will be
         // included for those families that were not merged.
         let scores_file =
-            extract_scores(&alignment_file, &prev_scores, &consensi, &round_dir)?;
+            extract_scores(&alignment_file, &prev_scores, &batch_consensi, &round_dir)?;
 
         // Save this round's alignment scores for the next
         prev_scores = Some(scores_file.clone());
@@ -566,7 +645,7 @@ fn merge_component(
         let mut score_lookup: HashMap<StringPair, f64> = HashMap::new();
         for pair in &pair_independence {
             score_lookup.insert(
-                StringPair::new(pair.f1.to_string(), pair.f2.to_string()),
+                StringPair(pair.f1.to_string(), pair.f2.to_string()),
                 pair.val,
             );
         }
@@ -637,6 +716,8 @@ fn merge_component(
                     num_threads: args.num_threads.unwrap_or(num_cpus::get()),
                     refiner: &args.refiner,
                     perl5lib: &args.perl5lib,
+                    flipped: flipped_pairs
+                        .contains(&StringPair::new(pair.f1.clone(), pair.f2.clone())),
                 },
                 &mut family_to_instance,
             )?;
@@ -680,10 +761,10 @@ fn merge_component(
             writeln!(new_consensi, ">{family_number} {family_name}\n{seq}",)?;
         }
 
-        consensi = new_consensi_path.to_path_buf();
+        batch_consensi = new_consensi_path.to_path_buf();
     }
 
-    let mut reader = FastaReader::new(open(&consensi)?);
+    let mut reader = FastaReader::new(open(&batch_consensi)?);
     let mut new_seqs = 0;
     for result in reader.records() {
         let mut record = result?;
@@ -735,7 +816,7 @@ fn run_rmblastn(
     let outfile = outdir.join("blast.tsv");
 
     if outfile.exists() {
-        debug!("Reusing previous BLAST output file '{}'", outfile.display());
+        debug!("Reusing BLAST output file '{}'", outfile.display());
     } else {
         let db_path = &outdir.join("db");
         let makeblastdb_args = &[
@@ -1012,8 +1093,11 @@ fn check_family_instances(
     let instances: Vec<_> = fs::read_dir(&args.instances)?
         .map_while(Result::ok)
         .collect();
-
-    debug!("Found {} instance files", instances.len());
+    debug!(
+        "Found {} instance files in '{}",
+        args.instances.display(),
+        instances.len()
+    );
 
     let working_dir = args.outdir.join("select");
     fs::create_dir_all(&working_dir)?;
@@ -1269,16 +1353,33 @@ fn select_instances(
 fn downsample(
     fasta: &PathBuf,
     num_wanted: usize,
+    rev_comp: bool,
     mut output: impl Write,
 ) -> Result<usize> {
     let mut reader = parse_reader(open(fasta)?)?;
     let mut num_taken = 0;
 
+    debug!(
+        "Taking {num_wanted} from '{}' ({})",
+        fasta.display(),
+        if rev_comp { "RevComp" } else { "Normal" }
+    );
+
     while let Some(rec) = reader.iter_record()? {
         if num_taken == num_wanted {
             break;
         }
-        writeln!(output, ">{}{}\n{}", rec.head(), rec.des(), rec.seq())?;
+        writeln!(
+            output,
+            ">{}{}\n{}",
+            rec.head(),
+            rec.des(),
+            if rev_comp {
+                String::from_utf8(revcomp(rec.seq().as_bytes()))?
+            } else {
+                rec.seq().to_string()
+            }
+        )?;
         num_taken += 1;
     }
 
@@ -1484,11 +1585,18 @@ fn merge_families(
     {
         let mut output = open_for_write(&new_family_path)?;
         let mut total_taken = 0;
+        let mut one_flipped = false;
         for (fam, num) in &[(f1, num_from1), (f2, num_from2)] {
             let fasta = family_to_instance
                 .get(fam)
                 .unwrap_or_else(|| panic!("Missing instances for family '{fam}'"));
-            total_taken += downsample(fasta, *num, &mut output)?;
+            let flip = if args.flipped && !one_flipped {
+                one_flipped = true;
+                true
+            } else {
+                false
+            };
+            total_taken += downsample(fasta, *num, flip, &mut output)?;
         }
 
         if total_taken == 0 {

@@ -36,6 +36,7 @@ tua1:
 	cargo run -- \
         --align-matrix $(MATRIX) \
 		--build-components-only \
+		--logfile   - \
         --outdir    tuatara-out \
         --outfile   tuatara-out/new-consensi.fa \
         --instances ~/wheelerlab/tuatara/instances \
@@ -45,11 +46,11 @@ tua2:
 	cargo run -- \
         --align-matrix $(MATRIX) \
         --outdir       tuatara-out \
-		--logfile      - \
+        --logfile      - \
         --outfile      tuatara-out/new-consensi.fa \
-        --component    tuatara-out/components/component-0 \
-        --instances    data/tuatara/instances \
-        --consensi     data/tuatara/consensi.fa
+        --component    tuatara-out/components/component-152 \
+        --instances    ~/wheelerlab/tuatara/instances \
+        --consensi     ~/wheelerlab/tuatara/consensi.fa
 
 clean:
 	rm -rf RM_* makedb.log
