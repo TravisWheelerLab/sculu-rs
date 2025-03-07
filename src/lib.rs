@@ -526,7 +526,7 @@ fn merge_component(
 ) -> Result<PathBuf> {
     // The "component-N" file will contain the names of the families
     let families = read_lines(&component_file.to_path_buf())?;
-    dbg!(&families);
+    //dbg!(&families);
 
     // Get the alignments underlying this component
     let component_dir = component_file.parent().expect("Failed to get parent dir");
@@ -548,7 +548,7 @@ fn merge_component(
             }
         }
     }
-    dbg!(&flipped_pairs);
+    //dbg!(&flipped_pairs);
 
     // Create a working dir with the same name as the component file
     let component_name = component_file
@@ -569,7 +569,7 @@ fn merge_component(
     let start = Instant::now();
 
     // Create a consensi file for this round containing only the given families
-    dbg!(&batch_dir);
+    //dbg!(&batch_dir);
     let mut batch_consensi = batch_dir.join("consensi.fa");
     {
         // Scoped to cause fasta_writer to close
