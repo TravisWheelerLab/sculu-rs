@@ -1,6 +1,6 @@
 [package]
 name = "sculu"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -15,7 +15,7 @@ itertools = "0.14.0"
 kseq = "0.5.3"
 log = "0.4.22"
 newick = "0.11.0"
-noodles-fasta = "0.49.0"
+noodles-fasta = "0.50.0"
 num_cpus = "1.16.0"
 petgraph = "0.7.1"
 rand = "0.9"
