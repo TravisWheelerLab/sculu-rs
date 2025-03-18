@@ -47,10 +47,9 @@ tua2:
         --align-matrix $(MATRIX) \
         --outdir       tuatara-out \
         --logfile      - \
-        --outfile      tuatara-out/new-consensi.fa \
-        --component    tuatara-out/components/component-152 \
-        --instances    ~/wheelerlab/tuatara/instances \
-        --consensi     ~/wheelerlab/tuatara/consensi.fa
+        --component    tuatara-out/components/component-007 \
+        --instances    tuatara-out/instances \
+        --consensi     tuatara-out/consensi.fa
 
 clean:
 	rm -rf RM_* makedb.log

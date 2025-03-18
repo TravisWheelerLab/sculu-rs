@@ -251,19 +251,16 @@ pub fn run(args: Args) -> Result<()> {
         })
         .init();
 
-    let taken_instances_dir = args.outdir.join("instances");
-    fs::create_dir_all(&taken_instances_dir)?;
-
-    let (consensi_file, family_to_instance) =
-        check_family_instances(&args, &taken_instances_dir)?;
-    //debug!("family_to_instance = '{family_to_instance:#?}'");
-
     if let Some(ref component_file) = args.component {
+        // If given an component file to process, assume the 
+        // consensi and instances have been properly filtered 
+        // and use given args as-is.
+        let family_to_instance = read_instances_dir(&args.instances)?;
         let merged = merge_component(
             component_file,
-            &consensi_file,
+            &args.consensi,
             family_to_instance,
-            &taken_instances_dir,
+            &args.instances,
             &args,
         )?;
         debug!(
@@ -272,9 +269,19 @@ pub fn run(args: Args) -> Result<()> {
             merged.display()
         );
     } else {
+        // If in this branch, we start from scratch and vet the instances
+        // and consensi sequences before starting.
+        let taken_instances_dir = args.outdir.join("instances");
+        fs::create_dir_all(&taken_instances_dir)?;
+
+        let (consensi_file, family_to_instance) = 
+            check_family_instances(&args, &taken_instances_dir)?;
+
         // This will only BLAST if there are no components from a previous run
         let components = align_consensi_to_self(&consensi_file, &args)?;
 
+        // The user can bail after building the components in order to 
+        // process them concurrently.
         if args.build_components_only {
             return Ok(());
         }
@@ -439,7 +446,7 @@ pub fn align_consensi_to_self(consensi: &Path, args: &Args) -> Result<Components
 fn take_best_alignments(blast_out: &PathBuf, output: &PathBuf) -> Result<()> {
     let now = Instant::now();
 
-    if fs::metadata(&output).map_or(0, |meta| meta.len()) > 0 {
+    if fs::metadata(output).map_or(0, |meta| meta.len()) > 0 {
         debug!("Reusing best alignments '{}'", output.display());
     } else {
         debug!("Taking best alignments from '{}'", blast_out.display());
@@ -1083,9 +1090,12 @@ fn cat_sequences(
 }
 
 // --------------------------------------------------
+// This function will first filter the instances for those that 
+// are most representative of the family, and then it will filter
+// the consensi for those that have sufficient supporting instances.
 fn check_family_instances(
     args: &Args,
-    taken_instances_dir: &PathBuf,
+    taken_instances_dir: &Path,
 ) -> Result<(PathBuf, HashMap<String, PathBuf>)> {
     debug!("Checking consensi_file '{}'", args.consensi.display());
 
@@ -1130,18 +1140,7 @@ fn check_family_instances(
         Ok(())
     })?;
 
-    // Create hashmap from family name to taken instance file
-    let mut family_to_instance: HashMap<String, PathBuf> = HashMap::new();
-    for entry in fs::read_dir(taken_instances_dir)? {
-        let entry = entry?;
-        if let Some(stem) = entry.path().file_stem() {
-            let family_name = stem.to_string_lossy().to_string();
-            if !family_name.starts_with("inst-") {
-                family_to_instance.insert(family_name, entry.path().to_path_buf());
-            }
-        }
-    }
-
+    let family_to_instance = read_instances_dir(taken_instances_dir)?;
     debug!(
         "family_to_instance has {} members",
         family_to_instance.len()
@@ -1181,6 +1180,22 @@ fn check_family_instances(
     }
 
     Ok((taken_consensi_path, family_to_instance))
+}
+
+// --------------------------------------------------
+fn read_instances_dir(instances_dir: &Path) -> Result<HashMap<String, PathBuf>> {
+    // Create hashmap from family name to taken instance file
+    let mut family_to_instance: HashMap<String, PathBuf> = HashMap::new();
+    for entry in fs::read_dir(instances_dir)? {
+        let entry = entry?;
+        if let Some(stem) = entry.path().file_stem() {
+            let family_name = stem.to_string_lossy().to_string();
+            if !family_name.starts_with("inst-") {
+                family_to_instance.insert(family_name, entry.path().to_path_buf());
+            }
+        }
+    }
+    Ok(family_to_instance)
 }
 
 // --------------------------------------------------
