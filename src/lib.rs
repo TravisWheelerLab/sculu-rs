@@ -252,8 +252,8 @@ pub fn run(args: Args) -> Result<()> {
         .init();
 
     if let Some(ref component_file) = args.component {
-        // If given an component file to process, assume the 
-        // consensi and instances have been properly filtered 
+        // If given an component file to process, assume the
+        // consensi and instances have been properly filtered
         // and use given args as-is.
         let family_to_instance = read_instances_dir(&args.instances)?;
         let merged = merge_component(
@@ -274,13 +274,13 @@ pub fn run(args: Args) -> Result<()> {
         let taken_instances_dir = args.outdir.join("instances");
         fs::create_dir_all(&taken_instances_dir)?;
 
-        let (consensi_file, family_to_instance) = 
+        let (consensi_file, family_to_instance) =
             check_family_instances(&args, &taken_instances_dir)?;
 
         // This will only BLAST if there are no components from a previous run
         let components = align_consensi_to_self(&consensi_file, &args)?;
 
-        // The user can bail after building the components in order to 
+        // The user can bail after building the components in order to
         // process them concurrently.
         if args.build_components_only {
             return Ok(());
@@ -369,12 +369,18 @@ pub fn align_consensi_to_self(consensi: &Path, args: &Args) -> Result<Components
         let mut alignment_wtr = WriterBuilder::new()
             .has_headers(true)
             .delimiter(b'\t')
-            .from_path(&alignment_file)?;
+            .from_path(&alignment_file)
+            .map_err(|e| {
+                anyhow!("Failed to write '{}': {e}", &alignment_file.display())
+            })?;
 
         let mut reader = ReaderBuilder::new()
             .delimiter(b'\t')
             .has_headers(true)
-            .from_path(best_alignments)?;
+            .from_path(&best_alignments)
+            .map_err(|e| {
+                anyhow!("Failed to read '{}': {e}", &best_alignments.display())
+            })?;
 
         let mut records = vec![];
         for res in reader.records() {
@@ -453,12 +459,18 @@ fn take_best_alignments(blast_out: &PathBuf, output: &PathBuf) -> Result<()> {
         let mut reader = ReaderBuilder::new()
             .delimiter(b'\t')
             .has_headers(false)
-            .from_path(blast_out)?;
+            .from_path(blast_out)
+            .map_err(|e| {
+                anyhow!("Failed to read '{}': {e}", &blast_out.display())
+            })?;
 
         let mut writer = WriterBuilder::new()
             .has_headers(true)
             .delimiter(b'\t')
-            .from_path(output)?;
+            .from_path(output)
+            .map_err(|e| {
+                anyhow!("Failed to write '{}': {e}", &output.display())
+            })?;
 
         let mut taken = HashMap::<StringPair, RmBlastOutput>::new();
         for res in reader.records() {
@@ -531,9 +543,10 @@ fn merge_component(
     taken_instances_dir: &PathBuf,
     args: &Args,
 ) -> Result<PathBuf> {
+    debug!("Merging component '{}'", component_file.display());
+
     // The "component-N" file will contain the names of the families
     let families = read_lines(&component_file.to_path_buf())?;
-    //dbg!(&families);
 
     // Get the alignments underlying this component
     let component_dir = component_file.parent().expect("Failed to get parent dir");
@@ -541,7 +554,8 @@ fn merge_component(
     let mut alignment_reader = ReaderBuilder::new()
         .delimiter(b'\t')
         .has_headers(true)
-        .from_path(alignment_path)?;
+        .from_path(&alignment_path)
+        .map_err(|e| anyhow!("Failed to read '{}': {e}", &alignment_path.display()))?;
 
     let mut flipped_pairs: HashSet<StringPair> = HashSet::new();
     for res in alignment_reader.records() {
@@ -555,7 +569,6 @@ fn merge_component(
             }
         }
     }
-    //dbg!(&flipped_pairs);
 
     // Create a working dir with the same name as the component file
     let component_name = component_file
@@ -576,7 +589,6 @@ fn merge_component(
     let start = Instant::now();
 
     // Create a consensi file for this round containing only the given families
-    //dbg!(&batch_dir);
     let mut batch_consensi = batch_dir.join("consensi.fa");
     {
         // Scoped to cause fasta_writer to close
@@ -800,7 +812,8 @@ fn parse_alignment(blast_out: &PathBuf) -> Result<Vec<RmBlastOutput>> {
     let mut reader = ReaderBuilder::new()
         .delimiter(b'\t')
         .has_headers(false)
-        .from_path(blast_out)?;
+        .from_path(&blast_out)
+        .map_err(|e| anyhow!("Failed to read '{}': {e}", &blast_out.display()))?;
 
     let mut records = vec![];
     for res in reader.records() {
@@ -972,7 +985,8 @@ fn call_winners(
     let mut reader = ReaderBuilder::new()
         .delimiter(b'\t')
         .has_headers(true)
-        .from_path(scores_file)?;
+        .from_path(&scores_file)
+        .map_err(|e| anyhow!("Failed to read '{}': {e}", &scores_file.display()))?;
     let records = reader.deserialize();
 
     let mut scores: HashMap<String, HashMap<String, usize>> = HashMap::new();
@@ -1090,7 +1104,7 @@ fn cat_sequences(
 }
 
 // --------------------------------------------------
-// This function will first filter the instances for those that 
+// This function will first filter the instances for those that
 // are most representative of the family, and then it will filter
 // the consensi for those that have sufficient supporting instances.
 fn check_family_instances(
@@ -1104,9 +1118,9 @@ fn check_family_instances(
         .map_while(Result::ok)
         .collect();
     debug!(
-        "Found {} instance files in '{}",
+        "Found {} instance files in '{}'",
+        instances.len(),
         args.instances.display(),
-        instances.len()
     );
 
     let working_dir = args.outdir.join("select");
@@ -1425,7 +1439,8 @@ fn extract_scores(
     let mut scores_wtr = WriterBuilder::new()
         .has_headers(true)
         .delimiter(b'\t')
-        .from_path(&scores_file)?;
+        .from_path(&scores_file)
+        .map_err(|e| anyhow!("Failed to write '{}': {e}", &scores_file.display()))?;
 
     // This is a hash to remember the family names we handled
     // in this round. When reading the scores from the previous
@@ -1436,7 +1451,8 @@ fn extract_scores(
     let mut align_reader = ReaderBuilder::new()
         .delimiter(b'\t')
         .has_headers(false)
-        .from_path(alignment_file)?;
+        .from_path(&alignment_file)
+        .map_err(|e| anyhow!("Failed to read '{}': {e}", &alignment_file.display()))?;
 
     let records = align_reader.records();
     for res in records {
@@ -1466,7 +1482,8 @@ fn extract_scores(
         let mut reader = ReaderBuilder::new()
             .delimiter(b'\t')
             .has_headers(true)
-            .from_path(prev_scores)?;
+            .from_path(prev_scores)
+            .map_err(|e| anyhow!("Failed to read '{}': {e}", &prev_scores.display()))?;
         let records = reader.deserialize();
         for res in records {
             let rec: AlignmentScore = res?;
