@@ -3,7 +3,7 @@ mod graph;
 use anyhow::{anyhow, bail, Result};
 use bio::alphabets::dna::revcomp;
 use chrono::Duration;
-use clap::Parser;
+use clap::{builder::PossibleValue, Parser, ValueEnum};
 use csv::{ReaderBuilder, WriterBuilder};
 use itertools::Itertools;
 use kseq::parse_reader;
@@ -37,10 +37,33 @@ const MIN_NUM_INSTANCES: usize = 10;
 const MIN_LEN_SIMILARITY: f64 = 0.9;
 const MIN_ALIGN_COVER: f64 = 0.9;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum SequenceAlphabet {
+    Dna,
+    Protein,
+}
+
+impl ValueEnum for SequenceAlphabet {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[SequenceAlphabet::Dna, SequenceAlphabet::Protein]
+    }
+
+    fn to_possible_value<'a>(&self) -> Option<PossibleValue> {
+        Some(match self {
+            SequenceAlphabet::Dna => PossibleValue::new("dna"),
+            SequenceAlphabet::Protein => PossibleValue::new("protein"),
+        })
+    }
+}
+
 /// SCULU subfamily clustering tool
 #[derive(Debug, Parser)]
 #[command(version, about)]
 pub struct Args {
+    /// Sequence alphabet
+    #[arg(short, long, value_name = "ALPHABET", required = true)]
+    pub alphabet: SequenceAlphabet,
+
     /// FASTA file of subfamily consensi
     #[arg(long, value_name = "CONSENSI", required = true)]
     pub consensi: PathBuf,
@@ -81,18 +104,16 @@ pub struct Args {
     #[arg(long, value_name = "CONF", default_value = "3")]
     pub confidence_margin: isize,
 
-    /// Path to RepeatModeler/Refiner
-    #[arg(long, value_name = "REFINER")]
-    pub refiner: Option<String>,
-
+    // Path to RepeatModeler/Refiner
+    //#[arg(long, value_name = "REFINER")]
+    //pub refiner: Option<String>,
     /// Number of threads for rmblastn/Refiner
     #[arg(long, value_name = "THREADS")]
     pub num_threads: Option<usize>,
 
-    /// PERL5LIB, location of RepeatMasker/RepeatModeler
-    #[arg(long, value_name = "PERL5LIB")]
-    pub perl5lib: Option<String>,
-
+    // PERL5LIB, location of RepeatMasker/RepeatModeler
+    //#[arg(long, value_name = "PERL5LIB")]
+    //pub perl5lib: Option<String>,
     /// Path to rmblastn
     #[arg(long, value_name = "ALIGNER")]
     pub aligner: Option<String>,
@@ -219,8 +240,7 @@ struct MergeFamilies<'a> {
     outdir: PathBuf,
     taken_instances_dir: &'a PathBuf,
     num_threads: usize,
-    refiner: &'a Option<String>,
-    perl5lib: &'a Option<String>,
+    alphabet: SequenceAlphabet,
     flipped: bool,
 }
 
@@ -460,17 +480,13 @@ fn take_best_alignments(blast_out: &PathBuf, output: &PathBuf) -> Result<()> {
             .delimiter(b'\t')
             .has_headers(false)
             .from_path(blast_out)
-            .map_err(|e| {
-                anyhow!("Failed to read '{}': {e}", &blast_out.display())
-            })?;
+            .map_err(|e| anyhow!("Failed to read '{}': {e}", &blast_out.display()))?;
 
         let mut writer = WriterBuilder::new()
             .has_headers(true)
             .delimiter(b'\t')
             .from_path(output)
-            .map_err(|e| {
-                anyhow!("Failed to write '{}': {e}", &output.display())
-            })?;
+            .map_err(|e| anyhow!("Failed to write '{}': {e}", &output.display()))?;
 
         let mut taken = HashMap::<StringPair, RmBlastOutput>::new();
         for res in reader.records() {
@@ -733,8 +749,7 @@ fn merge_component(
                     outdir: msa_dir.to_path_buf(),
                     taken_instances_dir,
                     num_threads: args.num_threads.unwrap_or(num_cpus::get()),
-                    refiner: &args.refiner,
-                    perl5lib: &args.perl5lib,
+                    alphabet: args.alphabet,
                     flipped: flipped_pairs
                         .contains(&StringPair::new(pair.f1.clone(), pair.f2.clone())),
                 },
@@ -908,9 +923,9 @@ fn run_rmblastn(
         };
 
         let mut cmd = std::process::Command::new(&rmblastn);
-        if let Some(perl5lib) = &args.perl5lib {
-            cmd.env("PERL5LIB", perl5lib);
-        }
+        //if let Some(perl5lib) = &args.perl5lib {
+        //    cmd.env("PERL5LIB", perl5lib);
+        //}
 
         if let Some(matrix) = &args.align_matrix {
             let matrix_filename = matrix.file_name().unwrap_or_else(|| {
@@ -1142,7 +1157,7 @@ fn check_family_instances(
                     &working_dir,
                     args,
                 ) {
-                    eprintln!("Error: {e}");
+                    eprintln!("Warning: {e}");
                 }
             }
         } else {
@@ -1643,15 +1658,93 @@ fn merge_families(
     let msa_input = args.outdir.join("msa-input.fa");
     fs::copy(new_family_path, &msa_input)?;
 
-    let refiner = match &args.refiner {
-        Some(path) => PathBuf::from(path.to_string()),
-        _ => which("Refiner").map_err(|e| anyhow!("Refiner: {e}"))?,
+    let consensus_path = match args.alphabet {
+        SequenceAlphabet::Dna => msa_dna(&msa_input, args.num_threads)?,
+        _ => msa_protein(&msa_input, args.num_threads)?,
     };
+
+    let mut reader = parse_reader(open(&consensus_path)?)?;
+    let consensus_seq = reader
+        .iter_record()?
+        .map(|rec| rec.seq().to_string())
+        .expect("Failed to read consensus file");
+
+    Ok(consensus_seq)
+}
+
+// --------------------------------------------------
+fn msa_protein(input_file: &Path, num_threads: usize) -> Result<PathBuf> {
+    let mafft = which("mafft").map_err(|e| anyhow!("mafft: {e}"))?;
+    let hmmbuild = which("hmmbuild").map_err(|e| anyhow!("hmmbuild: {e}"))?;
+    let hmmemit = which("hmmemit").map_err(|e| anyhow!("hmmemit: {e}"))?;
+
+    // mafft creates MSA
+    let start = Instant::now();
+    let mut mafft_cmd = std::process::Command::new(&mafft);
+    let res = mafft_cmd
+        .args(&[
+            "--auto".to_string(),
+            "--thread".to_string(),
+            num_threads.to_string(),
+            input_file.to_string_lossy().to_string(),
+        ])
+        .output()?;
+    if !res.status.success() {
+        debug!("{}", String::from_utf8(res.stdout)?);
+        bail!(String::from_utf8(res.stderr)?);
+    }
+
+    debug!(
+        "Mafft finished in {}",
+        format_seconds(start.elapsed().as_secs())
+    );
+
+    let outdir = input_file.parent().expect(&format!(
+        "Failed to get parent dir for {}",
+        input_file.display()
+    ));
+    let msa_path = outdir.join("msa.fa");
+    {
+        let mut file = open_for_write(&msa_path)?;
+        write!(file, "{}", String::from_utf8(res.stdout)?)?;
+    }
+
+    // hmmerbuild create HMM
+    let hmm_out = outdir.join("hmm.out");
+    let mut hmmbuild_cmd = std::process::Command::new(&hmmbuild);
+    let res = hmmbuild_cmd
+        .args(&[
+            hmm_out.to_string_lossy().to_string(),
+            msa_path.to_string_lossy().to_string(),
+        ])
+        .output()?;
+    if !res.status.success() {
+        debug!("{}", String::from_utf8(res.stdout)?);
+        bail!(String::from_utf8(res.stderr)?);
+    }
+
+    // hmmeremit generates a consensus sequence
+    let consensus_path = outdir.join("consensus.fa");
+    let mut hmmemit_cmd = std::process::Command::new(&hmmemit);
+    let res = hmmemit_cmd
+        .args(&["-c".to_string(), hmm_out.to_string_lossy().to_string()])
+        .output()?;
+    if !res.status.success() {
+        debug!("{}", String::from_utf8(res.stdout)?);
+        bail!(String::from_utf8(res.stderr)?);
+    }
+
+    Ok(consensus_path)
+}
+
+// --------------------------------------------------
+fn msa_dna(input_file: &Path, num_threads: usize) -> Result<PathBuf> {
+    let refiner = which("Refiner").map_err(|e| anyhow!("Refiner: {e}"))?;
 
     let mut refiner_args = vec![
         "-debug".to_string(),
         "-threads".to_string(),
-        args.num_threads.to_string(),
+        num_threads.to_string(),
     ];
 
     let rmblast = which("rmblastn").map_err(|e| anyhow!("rmblastn: {e}"))?;
@@ -1663,7 +1756,7 @@ fn merge_families(
         refiner_args.extend_from_slice(&["--rmblast_dir".to_string(), rmblast_dir]);
     }
 
-    refiner_args.push(msa_input.to_string_lossy().to_string());
+    refiner_args.push(input_file.to_string_lossy().to_string());
     debug!(
         r#"Running "{} {}""#,
         &refiner.display(),
@@ -1672,9 +1765,9 @@ fn merge_families(
 
     let start = Instant::now();
     let mut cmd = std::process::Command::new(&refiner);
-    if let Some(perl5lib) = &args.perl5lib {
-        cmd.env("PERL5LIB", perl5lib);
-    }
+    //if let Some(perl5lib) = &args.perl5lib {
+    //    cmd.env("PERL5LIB", perl5lib);
+    //}
     let res = cmd.args(refiner_args).output()?;
     if !res.status.success() {
         debug!("{}", String::from_utf8(res.stdout)?);
@@ -1686,7 +1779,11 @@ fn merge_families(
         format_seconds(start.elapsed().as_secs())
     );
 
-    let consensus_path = &args.outdir.join("msa-input.fa.refiner_cons");
+    let outdir = input_file.parent().expect(&format!(
+        "Failed to get parent dir for {}",
+        input_file.display()
+    ));
+    let consensus_path = outdir.join("msa-input.fa.refiner_cons");
     if !consensus_path.exists() {
         bail!(
             "Failed to find expected consensus file {}",
@@ -1694,13 +1791,7 @@ fn merge_families(
         );
     }
 
-    let mut reader = parse_reader(open(consensus_path)?)?;
-    let consensus_seq = reader
-        .iter_record()?
-        .map(|rec| rec.seq().to_string())
-        .expect("Failed to read consensus file");
-
-    Ok(consensus_seq)
+    Ok(consensus_path)
 }
 
 // --------------------------------------------------

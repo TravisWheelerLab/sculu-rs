@@ -10,6 +10,16 @@ run:
 		--confidence-margin      3 \
 		--align-matrix           $(MATRIX) 
 
+prot:
+	cargo run -- \
+		--outdir                 out-protein \
+		--outfile                out-protein/test.fa \
+		--consensi               data/proteins/kazel-10.fa \
+		--instances              tests/inputs/instances \
+		--independence-threshold .8 \
+		--confidence-margin      3 \
+		--align-matrix           $(MATRIX) 
+
 dup:
 	cargo run -- \
 		--instances tests/inputs/instances \
