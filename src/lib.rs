@@ -378,7 +378,12 @@ pub fn align_consensi_to_self(consensi: &Path, args: &Args) -> Result<Components
         debug!("Reusing existing component files");
     } else {
         let blast_dir = args.outdir.join("consensi_cluster");
-        let blast_out = run_rmblastn(&blast_dir, args, consensi, consensi)?;
+        let blast_out = match args.alphabet {
+            SequenceAlphabet::Dna => {
+                run_rmblastn(&blast_dir, args, consensi, consensi)?
+            }
+            _ => run_blastp(&blast_dir, args, consensi, consensi)?,
+        };
 
         // There may be multiple hits per pair, take highest
         let best_alignments = blast_dir.join("best.tsv");
@@ -657,8 +662,12 @@ fn merge_component(
         // Align all the sequences to the current consensi.
         // On the first round, all the original consensi will be included.
         // On future rounds, only the newly merged consensi will be present.
-        let alignment_file =
-            run_rmblastn(&round_dir, args, &batch_consensi, all_seqs_path)?;
+        let alignment_file = match args.alphabet {
+            SequenceAlphabet::Dna => {
+                run_rmblastn(&round_dir, args, &batch_consensi, all_seqs_path)?
+            }
+            _ => run_blastp(&round_dir, args, &batch_consensi, all_seqs_path)?,
+        };
 
         // Extract the scores from the alignment file.
         // On the first round, there will be no "prev_scores" file.
@@ -749,7 +758,7 @@ fn merge_component(
                     outdir: msa_dir.to_path_buf(),
                     taken_instances_dir,
                     num_threads: args.num_threads.unwrap_or(num_cpus::get()),
-                    alphabet: args.alphabet,
+                    alphabet: args.alphabet.clone(),
                     flipped: flipped_pairs
                         .contains(&StringPair::new(pair.f1.clone(), pair.f2.clone())),
                 },
@@ -838,6 +847,120 @@ fn parse_alignment(blast_out: &PathBuf) -> Result<Vec<RmBlastOutput>> {
     }
 
     Ok(records)
+}
+
+// --------------------------------------------------
+fn run_blastp(
+    outdir: &PathBuf,
+    args: &Args,
+    db: &Path,
+    query: &Path,
+) -> Result<PathBuf> {
+    fs::create_dir_all(outdir)?;
+    let outfile = outdir.join("blast.tsv");
+
+    if outfile.exists() {
+        debug!("Reusing BLAST output file '{}'", outfile.display());
+    } else {
+        let db_path = &outdir.join("db");
+        let makeblastdb_args = &[
+            "-out".to_string(),
+            db_path.to_string_lossy().to_string(),
+            "-parse_seqids".to_string(),
+            "-dbtype".to_string(),
+            "prot".to_string(),
+            "-in".to_string(),
+            db.to_string_lossy().to_string(),
+        ];
+
+        debug!("Running 'makeblastdb {}'", &makeblastdb_args.join(" "));
+        let makeblastdb =
+            which("makeblastdb").map_err(|e| anyhow!("makeblastdb: {e}"))?;
+        let res = std::process::Command::new(makeblastdb)
+            .args(makeblastdb_args)
+            .output()?;
+
+        if !res.status.success() {
+            bail!(String::from_utf8(res.stderr)?);
+        }
+
+        let mut blast_args = vec![
+            "-db".to_string(),
+            db_path.to_string_lossy().to_string(),
+            "-query".to_string(),
+            query.to_string_lossy().to_string(),
+            "-out".to_string(),
+            outfile.to_string_lossy().to_string(),
+            "-outfmt".to_string(),
+            "6 score qseqid sseqid qlen qstart qend slen sstart send cpg_kdiv pident"
+                .to_string(),
+            "-num_threads".to_string(),
+            args.num_threads.unwrap_or(num_cpus::get()).to_string(),
+            "-num_alignments".to_string(),
+            "9999999".to_string(),
+            //"-gapopen".to_string(),
+            //args.align_gap_open.to_string(),
+            //"-gapextend".to_string(),
+            //args.align_gap_extension.to_string(),
+            //"-word_size".to_string(),
+            //args.align_word_size.to_string(),
+            //"-xdrop_ungap".to_string(),
+            //(args.align_min_raw_gapped_score * 2).to_string(),
+            //"-xdrop_gap".to_string(),
+            //(args.align_min_raw_gapped_score / 2).to_string(),
+            //"-xdrop_gap_final".to_string(),
+            //args.align_min_raw_gapped_score.to_string(),
+        ];
+
+        //"-mask_level".to_string(),
+        //args.align_mask_level.to_string(),
+        //"-min_raw_gapped_score".to_string(),
+        //args.align_min_raw_gapped_score.to_string(),
+        //"-dust".to_string(),
+        //if args.align_dust {
+        //    "yes".to_string()
+        //} else {
+        //    "no".to_string()
+        //},
+
+        if args.align_complexity_adjust {
+            blast_args.push("-complexity_adjust".to_string());
+        }
+
+        let blastp = which("blastp").map_err(|e| anyhow!("blastp: {e}"))?;
+        let mut cmd = std::process::Command::new(&blastp);
+
+        //if let Some(matrix) = &args.align_matrix {
+        //    let matrix_filename = matrix.file_name().unwrap_or_else(|| {
+        //        panic!("Failed to get filename from '{}'", matrix.display())
+        //    });
+        //
+        //    let matrix_dir = matrix.parent().unwrap_or_else(|| {
+        //        panic!("Failed to get dirname from '{}'", matrix.display())
+        //    });
+        //
+        //    cmd.env("BLASTMAT", matrix_dir);
+        //    blast_args.extend_from_slice(&[
+        //        "-matrix".to_string(),
+        //        matrix_filename.to_string_lossy().to_string(),
+        //    ]);
+        //}
+
+        debug!("Running '{} {}'", blastp.display(), blast_args.join(" "));
+
+        let start = Instant::now();
+        let res = cmd.args(blast_args).output()?;
+        if !res.status.success() {
+            bail!(String::from_utf8(res.stderr)?);
+        }
+
+        debug!(
+            "blastp finished in {}",
+            format_seconds(start.elapsed().as_secs())
+        );
+    }
+
+    Ok(outfile)
 }
 
 // --------------------------------------------------
@@ -1279,7 +1402,10 @@ fn select_instances(
         .map(|rec| rec.sequence().len())?;
 
     // BLAST the instances to the consensus
-    let blast_out = run_rmblastn(&blast_dir, args, &db_path, from_path)?;
+    let blast_out = match args.alphabet {
+        SequenceAlphabet::Dna => run_rmblastn(&blast_dir, args, &db_path, from_path)?,
+        _ => run_blastp(&blast_dir, args, &db_path, from_path)?,
+    };
     let alignments = parse_alignment(&blast_out)?;
 
     // Remove short alignments, find the highest score for each hit
@@ -1681,14 +1807,15 @@ fn msa_protein(input_file: &Path, num_threads: usize) -> Result<PathBuf> {
     // mafft creates MSA
     let start = Instant::now();
     let mut mafft_cmd = std::process::Command::new(&mafft);
-    let res = mafft_cmd
-        .args(&[
-            "--auto".to_string(),
-            "--thread".to_string(),
-            num_threads.to_string(),
-            input_file.to_string_lossy().to_string(),
-        ])
-        .output()?;
+    let mafft_args = &[
+        "--auto".to_string(),
+        "--thread".to_string(),
+        num_threads.to_string(),
+        input_file.to_string_lossy().to_string(),
+    ];
+    debug!(r#"Running "{} {}""#, mafft.display(), mafft_args.join(" "));
+    let res = mafft_cmd.args(mafft_args).output()?;
+
     if !res.status.success() {
         debug!("{}", String::from_utf8(res.stdout)?);
         bail!(String::from_utf8(res.stderr)?);
@@ -1699,10 +1826,10 @@ fn msa_protein(input_file: &Path, num_threads: usize) -> Result<PathBuf> {
         format_seconds(start.elapsed().as_secs())
     );
 
-    let outdir = input_file.parent().expect(&format!(
-        "Failed to get parent dir for {}",
-        input_file.display()
-    ));
+    let outdir = input_file.parent().unwrap_or_else(|| {
+        panic!("Failed to get parent dir for {}", input_file.display())
+    });
+
     let msa_path = outdir.join("msa.fa");
     {
         let mut file = open_for_write(&msa_path)?;
