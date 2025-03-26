@@ -10,15 +10,20 @@ run:
 		--confidence-margin      3 \
 		--align-matrix           $(MATRIX) 
 
-prot:
+mfs:
 	cargo run -- \
-		--outdir                 out-protein \
-		--outfile                out-protein/test.fa \
-		--consensi               data/proteins/kazel-10.fa \
-		--instances              tests/inputs/instances \
-		--independence-threshold .8 \
-		--confidence-margin      3 \
-		--align-matrix           $(MATRIX) 
+		--alphabet  protein \
+		--logfile   - \
+		--outdir    out-mfs \
+		--consensi  ~/wheelerlab/data/proteins/mfs/consensi.fa \
+		--instances ~/wheelerlab/data/proteins/mfs/instances 
+
+pf:
+	cargo run -- \
+		--alphabet  protein \
+		--outdir    pfam \
+		--consensi  ~/wheelerlab/data/proteins/pfam/consensi.fa \
+		--instances ~/wheelerlab/data/proteins/pfam/instances 
 
 dup:
 	cargo run -- \

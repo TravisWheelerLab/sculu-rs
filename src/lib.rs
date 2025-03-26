@@ -30,7 +30,8 @@ use std::{
 };
 use which::which;
 
-const MIN_INSTANCE_SEQUENCE_LENGTH: usize = 30;
+const MIN_INSTANCE_SEQUENCE_LENGTH_DNA: usize = 30;
+const MIN_INSTANCE_SEQUENCE_LENGTH_PROT: usize = 12;
 const MIN_CONSENSUS_COVERAGE: usize = 5;
 const MAX_NUM_INSTANCES: usize = 100;
 const MIN_NUM_INSTANCES: usize = 10;
@@ -1410,9 +1411,14 @@ fn select_instances(
 
     // Remove short alignments, find the highest score for each hit
     let mut targets: HashMap<String, usize> = HashMap::new();
+    let min_len = match args.alphabet {
+        SequenceAlphabet::Dna => MIN_INSTANCE_SEQUENCE_LENGTH_DNA,
+        _ => MIN_INSTANCE_SEQUENCE_LENGTH_PROT,
+    };
+
     for aln in alignments
         .iter()
-        .filter(|aln| aln.query_len >= MIN_INSTANCE_SEQUENCE_LENGTH)
+        .filter(|aln| aln.query_len >= min_len)
     {
         if let Some(val) = targets.get_mut(&aln.target) {
             *val = max(aln.score, *val);
@@ -1839,26 +1845,32 @@ fn msa_protein(input_file: &Path, num_threads: usize) -> Result<PathBuf> {
     // hmmerbuild create HMM
     let hmm_out = outdir.join("hmm.out");
     let mut hmmbuild_cmd = std::process::Command::new(&hmmbuild);
-    let res = hmmbuild_cmd
-        .args(&[
-            hmm_out.to_string_lossy().to_string(),
+    let hmmbuild_args = &[ hmm_out.to_string_lossy().to_string(),
             msa_path.to_string_lossy().to_string(),
-        ])
-        .output()?;
+        ];
+    let res = hmmbuild_cmd.args(hmmbuild_args).output()?;
+    debug!(r#"Running "{} {}""#, hmmbuild.display(), hmmbuild_args.join(" "));
+
     if !res.status.success() {
         debug!("{}", String::from_utf8(res.stdout)?);
         bail!(String::from_utf8(res.stderr)?);
     }
 
     // hmmeremit generates a consensus sequence
-    let consensus_path = outdir.join("consensus.fa");
     let mut hmmemit_cmd = std::process::Command::new(&hmmemit);
-    let res = hmmemit_cmd
-        .args(&["-c".to_string(), hmm_out.to_string_lossy().to_string()])
-        .output()?;
+    let hmmemit_args = &["-c".to_string(), hmm_out.to_string_lossy().to_string()];
+    let res = hmmemit_cmd.args(hmmemit_args).output()?;
+    debug!(r#"Running "{} {}""#, hmmemit.display(), hmmemit_args.join(" "));
+
     if !res.status.success() {
         debug!("{}", String::from_utf8(res.stdout)?);
         bail!(String::from_utf8(res.stderr)?);
+    }
+
+    let consensus_path = outdir.join("consensus.fa");
+    {
+        let mut file = open_for_write(&consensus_path)?;
+        write!(file, "{}", String::from_utf8(res.stdout)?)?;
     }
 
     Ok(consensus_path)
