@@ -1,0 +1,236 @@
+RMBLASTN 2.14.1+
+
+
+Reference: Robert M. Hubley, Arian Smit
+RMBlast - RepeatMasker Search Engine
+2010 <http://www.repeatmasker.org>
+
+Reference: Stephen F. Altschul, Thomas L. Madden, Alejandro A.
+Schaffer, Jinghui Zhang, Zheng Zhang, Webb Miller, and David J.
+Lipman (1997), "Gapped BLAST and PSI-BLAST: a new generation of
+protein database search programs", Nucleic Acids Res. 25:3389-3402.
+
+
+
+Database: out-test/select/AluYb9/db.fa
+           1 sequences; 318 total letters
+
+
+
+Query= hg38:chr11:127353813-127354130
+
+Length=318
+
+>AluYb9 
+Length=318
+
+ Score = 2904
+ Substitutions = 0.00%, Query Gaps = 0.00%, DB Gaps = 0.00%
+ TransI/TransV = 0/0,  CpG_sites = 23
+ Kimura Div = 0.00%, Kimura Div CpG Adjusted = 0.00%
+ Identities = 318/318 (100%), Gaps = 0/318 (0%)
+ Strand=Plus/Plus
+
+Query  1    GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGTGGA  60
+            ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+Sbjct  1    GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGTGGA  60
+
+Query  61   TCATGAGGTCAGGAGATCGAGACCATCCTGGCTAACAAGGTGAAACCCCGTCTCTACTAA  120
+            ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+Sbjct  61   TCATGAGGTCAGGAGATCGAGACCATCCTGGCTAACAAGGTGAAACCCCGTCTCTACTAA  120
+
+Query  121  AAATACAAAAAATTAGCCGGGCGCGGTGGCGGGCGCCTGTAGTCCCAGCTACTGGGGAGG  180
+            ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+Sbjct  121  AAATACAAAAAATTAGCCGGGCGCGGTGGCGGGCGCCTGTAGTCCCAGCTACTGGGGAGG  180
+
+Query  181  CTGAGGCAGGAGAATGGCGTGAACCCGGGAAGCGGAGCTTGCAGTGAGCCGAGATTGCGC  240
+            ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+Sbjct  181  CTGAGGCAGGAGAATGGCGTGAACCCGGGAAGCGGAGCTTGCAGTGAGCCGAGATTGCGC  240
+
+Query  241  CACTGCAGTCCGCAGTCCGGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAAAAAAAAA  300
+            ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+Sbjct  241  CACTGCAGTCCGCAGTCCGGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAAAAAAAAA  300
+
+Query  301  AAAAAAAAAAAAAAAAAA  318
+            ||||||||||||||||||
+Sbjct  301  AAAAAAAAAAAAAAAAAA  318
+
+
+ Score = 376
+ Substitutions = 26.25%, Query Gaps = 2.50%, DB Gaps = 0.00%
+ TransI/TransV = 13/8,  CpG_sites = 8
+ Kimura Div = 33.25%, Kimura Div CpG Adjusted = 27.70%
+ Identities = 59/82 (72%), Gaps = 2/82 (2%)
+ Strand=Plus/Plus
+
+Query  2    GCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGTGGAT  61
+            |||||||||||||||   |||||||| |||||||   | ||||||| ||||| || | ||
+Sbjct  136  GCCGGGCGCGGTGGCGGGCGCCTGTAGTCCCAGCTACTGGGGAGGCTGAGGCAGGAGAAT  195
+
+Query  62   --CATGAGGTCAGGAGATCGAG  81
+              | |||   | |||    |||
+Sbjct  196  GGCGTGAACCCGGGAAGCGGAG  217
+
+
+ Score = 366
+ Substitutions = 21.95%, Query Gaps = 1.22%, DB Gaps = 3.75%
+ TransI/TransV = 12/6,  CpG_sites = 7
+ Kimura Div = 28.00%, Kimura Div CpG Adjusted = 24.46%
+ Identities = 61/83 (73%), Gaps = 4/83 (5%)
+ Strand=Plus/Plus
+
+Query  136  GCCGGGCGCGGTGGCGGGCGCCTGTAGTCCCAGCTAC-TGGGGAGGCTGAGGCAGGAGAA  194
+            |||||||||||||||   |||||||| ||||||| || | ||||||| ||||| || | |
+Sbjct  2    GCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGC-ACTTTGGGAGGCCGAGGCGGGTGGA  60
+
+Query  195  TGGCGTGAACCCGGGAAGCGGAG  217
+            |  | |||   | |||    |||
+Sbjct  61   T--CATGAGGTCAGGAGATCGAG  81
+
+
+
+
+Query= hg38:chr21:29781969-29781654
+
+Length=316
+
+>AluYb9 
+Length=318
+
+ Score = 2874
+ Substitutions = 0.32%, Query Gaps = 0.00%, DB Gaps = 0.00%
+ TransI/TransV = 1/0,  CpG_sites = 23
+ Kimura Div = 0.32%, Kimura Div CpG Adjusted = 0.32%
+ Identities = 315/316 (99%), Gaps = 0/316 (0%)
+ Strand=Plus/Plus
+
+Query  1    GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGTGGA  60
+            ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+Sbjct  1    GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGTGGA  60
+
+Query  61   TCATGAGGTCAGGAGATCGAGACCATCCTGGCTAACAAGGTGAAACCCCGTCTCTACTAA  120
+            ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+Sbjct  61   TCATGAGGTCAGGAGATCGAGACCATCCTGGCTAACAAGGTGAAACCCCGTCTCTACTAA  120
+
+Query  121  AAATACAAAAAATTAGCCGGGCGCGGTGGCGGGCGCCTGTAGTCCCAGCTACTGGGGAGG  180
+            ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+Sbjct  121  AAATACAAAAAATTAGCCGGGCGCGGTGGCGGGCGCCTGTAGTCCCAGCTACTGGGGAGG  180
+
+Query  181  CTGAGGCAGGAGAATGGCGTGAACCCGGGAAGCGGAGCTTGCAGTGAGCCGAGATTGCGC  240
+            ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+Sbjct  181  CTGAGGCAGGAGAATGGCGTGAACCCGGGAAGCGGAGCTTGCAGTGAGCCGAGATTGCGC  240
+
+Query  241  CACTGCAGTCCGCAGTCCGGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAAAAAAAAA  300
+            ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+Sbjct  241  CACTGCAGTCCGCAGTCCGGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAAAAAAAAA  300
+
+Query  301  AAAAAAAAAAAAGAAA  316
+            |||||||||||| |||
+Sbjct  301  AAAAAAAAAAAAAAAA  316
+
+
+ Score = 376
+ Substitutions = 26.25%, Query Gaps = 2.50%, DB Gaps = 0.00%
+ TransI/TransV = 13/8,  CpG_sites = 8
+ Kimura Div = 33.25%, Kimura Div CpG Adjusted = 27.70%
+ Identities = 59/82 (72%), Gaps = 2/82 (2%)
+ Strand=Plus/Plus
+
+Query  2    GCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGTGGAT  61
+            |||||||||||||||   |||||||| |||||||   | ||||||| ||||| || | ||
+Sbjct  136  GCCGGGCGCGGTGGCGGGCGCCTGTAGTCCCAGCTACTGGGGAGGCTGAGGCAGGAGAAT  195
+
+Query  62   --CATGAGGTCAGGAGATCGAG  81
+              | |||   | |||    |||
+Sbjct  196  GGCGTGAACCCGGGAAGCGGAG  217
+
+
+ Score = 366
+ Substitutions = 21.95%, Query Gaps = 1.22%, DB Gaps = 3.75%
+ TransI/TransV = 12/6,  CpG_sites = 7
+ Kimura Div = 28.00%, Kimura Div CpG Adjusted = 24.46%
+ Identities = 61/83 (73%), Gaps = 4/83 (5%)
+ Strand=Plus/Plus
+
+Query  136  GCCGGGCGCGGTGGCGGGCGCCTGTAGTCCCAGCTAC-TGGGGAGGCTGAGGCAGGAGAA  194
+            |||||||||||||||   |||||||| ||||||| || | ||||||| ||||| || | |
+Sbjct  2    GCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGC-ACTTTGGGAGGCCGAGGCGGGTGGA  60
+
+Query  195  TGGCGTGAACCCGGGAAGCGGAG  217
+            |  | |||   | |||    |||
+Sbjct  61   T--CATGAGGTCAGGAGATCGAG  81
+
+
+Query= hg38:chr1:193177242-193177550
+
+Length=309
+
+
+***** No hits found *****
+
+
+Query= hg38:chr5:167342826-167342539
+
+Length=288
+
+>AluYb9 
+Length=318
+
+ Score = 2617
+ Substitutions = 1.04%, Query Gaps = 0.00%, DB Gaps = 0.00%
+ TransI/TransV = 2/1,  CpG_sites = 23
+ Kimura Div = 1.05%, Kimura Div CpG Adjusted = 0.42%
+ Identities = 285/288 (99%), Gaps = 0/288 (0%)
+ Strand=Plus/Plus
+
+Query  1    GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGAGGGTGGA  60
+            |||||||||||||||||||||||||||||||||||||||||||||||||||| |||||||
+Sbjct  1    GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGTGGA  60
+
+Query  61   TCATGAGGTCAGGAGATCGAGACCATCCTGGCTAACAAGGTGAAACCCCGTCTCTACTAA  120
+            ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+Sbjct  61   TCATGAGGTCAGGAGATCGAGACCATCCTGGCTAACAAGGTGAAACCCCGTCTCTACTAA  120
+
+Query  121  AAATACAAAAAATTAGCCAGGCGCAGTGGCGGGCGCCTGTAGTCCCAGCTACTGGGGAGG  180
+            |||||||||||||||||| ||||| |||||||||||||||||||||||||||||||||||
+Sbjct  121  AAATACAAAAAATTAGCCGGGCGCGGTGGCGGGCGCCTGTAGTCCCAGCTACTGGGGAGG  180
+
+Query  181  CTGAGGCAGGAGAATGGCGTGAACCCGGGAAGCGGAGCTTGCAGTGAGCCGAGATTGCGC  240
+            ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+Sbjct  181  CTGAGGCAGGAGAATGGCGTGAACCCGGGAAGCGGAGCTTGCAGTGAGCCGAGATTGCGC  240
+
+Query  241  CACTGCAGTCCGCAGTCCGGCCTGGGCGACAGAGCGAGACTCCGTCTC  288
+            ||||||||||||||||||||||||||||||||||||||||||||||||
+Sbjct  241  CACTGCAGTCCGCAGTCCGGCCTGGGCGACAGAGCGAGACTCCGTCTC  288
+
+
+ Score = 353
+ Substitutions = 27.50%, Query Gaps = 2.50%, DB Gaps = 0.00%
+ TransI/TransV = 13/9,  CpG_sites = 8
+ Kimura Div = 35.14%, Kimura Div CpG Adjusted = 29.47%
+ Identities = 58/82 (71%), Gaps = 2/82 (2%)
+ Strand=Plus/Plus
+
+Query  2    GCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGAGGGTGGAT  61
+            |||||||||||||||   |||||||| |||||||   | ||||||| ||||  || | ||
+Sbjct  136  GCCGGGCGCGGTGGCGGGCGCCTGTAGTCCCAGCTACTGGGGAGGCTGAGGCAGGAGAAT  195
+
+Query  62   --CATGAGGTCAGGAGATCGAG  81
+              | |||   | |||    |||
+Sbjct  196  GGCGTGAACCCGGGAAGCGGAG  217
+
+
+ Score = 342
+ Substitutions = 24.39%, Query Gaps = 1.22%, DB Gaps = 3.75%
+ TransI/TransV = 14/6,  CpG_sites = 7
+ Kimura Div = 32.26%, Kimura Div CpG Adjusted = 24.84%
+ Identities = 59/83 (71%), Gaps = 4/83 (5%)
+ Strand=Plus/Plus
+
+Query  136  GCCAGGCGCAGTGGCGGGCGCCTGTAGTCCCAGCTAC-TGGGGAGGCTGAGGCAGGAGAA  194
+            ||| ||||| |||||   |||||||| ||||||| || | ||||||| ||||| || | |
+Sbjct  2    GCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGC-ACTTTGGGAGGCCGAGGCGGGTGGA  60
+
+Query  195  TGGCGTGAACCCGGGAAGCGGAG  217
+            |  | |||   | |||    |||
+Sbjct  61   T--CATGAGGTCAGGAGATCGAG  81

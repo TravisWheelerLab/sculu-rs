@@ -20,3 +20,7 @@ RM_*/
 makedb.log
 tests/inputs/alignment.txt
 tests/inputs/consensi.fa.*
+
+*out*
+pfam*
+
