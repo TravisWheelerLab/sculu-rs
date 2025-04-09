@@ -19,7 +19,6 @@ use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
-    cmp,
     cmp::{max, min},
     collections::{HashMap, HashSet},
     fmt,
@@ -34,7 +33,8 @@ const MIN_INSTANCE_SEQUENCE_LENGTH_DNA: usize = 30;
 const MIN_INSTANCE_SEQUENCE_LENGTH_PROT: usize = 12;
 const MIN_CONSENSUS_COVERAGE: usize = 5;
 const MAX_NUM_INSTANCES: usize = 100;
-const MIN_NUM_INSTANCES: usize = 10;
+const MIN_NUM_INSTANCES_DNA: usize = 10;
+const MIN_NUM_INSTANCES_PROT: usize = 1;
 const MIN_LEN_SIMILARITY: f64 = 0.9;
 const MIN_ALIGN_COVER: f64 = 0.9;
 
@@ -112,9 +112,6 @@ pub struct Args {
     #[arg(long, value_name = "THREADS")]
     pub num_threads: Option<usize>,
 
-    // PERL5LIB, location of RepeatMasker/RepeatModeler
-    //#[arg(long, value_name = "PERL5LIB")]
-    //pub perl5lib: Option<String>,
     /// Path to rmblastn
     #[arg(long, value_name = "ALIGNER")]
     pub aligner: Option<String>,
@@ -1047,9 +1044,6 @@ fn run_rmblastn(
         };
 
         let mut cmd = std::process::Command::new(&rmblastn);
-        //if let Some(perl5lib) = &args.perl5lib {
-        //    cmd.env("PERL5LIB", perl5lib);
-        //}
 
         if let Some(matrix) = &args.align_matrix {
             let matrix_filename = matrix.file_name().unwrap_or_else(|| {
@@ -1136,7 +1130,7 @@ fn call_winners(
             .entry(rec.target)
             .or_default()
             .entry(rec.query)
-            .and_modify(|v| *v = cmp::max(rec.score, *v))
+            .and_modify(|v| *v = max(rec.score, *v))
             .or_insert(rec.score);
     }
 
@@ -1360,10 +1354,14 @@ fn select_instances(
     working_dir: &Path,
     args: &Args,
 ) -> Result<usize> {
+    let min_num_instances = match args.alphabet {
+        SequenceAlphabet::Dna => MIN_NUM_INSTANCES_DNA,
+        _ => MIN_NUM_INSTANCES_PROT,
+    };
     if to_path.is_file() {
         let mut reader = FastaReader::new(open(to_path)?);
         let num = reader.records().count();
-        if num < MIN_NUM_INSTANCES {
+        if num < min_num_instances {
             debug!(
                 "Removing previous instance file {}, too few ({num})",
                 to_path.display()
@@ -1387,6 +1385,7 @@ fn select_instances(
             copy_fasta(&[family_name.to_string()], consensi_path, &mut writer)?;
 
         if num_taken != 1 {
+            fs::remove_file(db_path)?;
             bail!(
                 "Failed to find family '{family_name}' in consensi '{}'",
                 consensi_path.display()
@@ -1399,7 +1398,7 @@ fn select_instances(
     let consensus_len = reader
         .records()
         .next()
-        .unwrap()
+        .unwrap_or_else(|| panic!("failed to read {db_path:?}"))
         .map(|rec| rec.sequence().len())?;
 
     // BLAST the instances to the consensus
@@ -1416,10 +1415,7 @@ fn select_instances(
         _ => MIN_INSTANCE_SEQUENCE_LENGTH_PROT,
     };
 
-    for aln in alignments
-        .iter()
-        .filter(|aln| aln.query_len >= min_len)
-    {
+    for aln in alignments.iter().filter(|aln| aln.query_len >= min_len) {
         if let Some(val) = targets.get_mut(&aln.target) {
             *val = max(aln.score, *val);
         } else {
@@ -1514,7 +1510,7 @@ fn select_instances(
     }
 
     // Be sure to remove any empty files
-    if num_taken < MIN_NUM_INSTANCES && to_path.exists() {
+    if num_taken < min_num_instances && to_path.exists() {
         debug!("Removing family '{family_name}', too few instances ({num_taken})");
         fs::remove_file(to_path)?;
         num_taken = 0;
@@ -1845,11 +1841,16 @@ fn msa_protein(input_file: &Path, num_threads: usize) -> Result<PathBuf> {
     // hmmerbuild create HMM
     let hmm_out = outdir.join("hmm.out");
     let mut hmmbuild_cmd = std::process::Command::new(&hmmbuild);
-    let hmmbuild_args = &[ hmm_out.to_string_lossy().to_string(),
-            msa_path.to_string_lossy().to_string(),
-        ];
+    let hmmbuild_args = &[
+        hmm_out.to_string_lossy().to_string(),
+        msa_path.to_string_lossy().to_string(),
+    ];
     let res = hmmbuild_cmd.args(hmmbuild_args).output()?;
-    debug!(r#"Running "{} {}""#, hmmbuild.display(), hmmbuild_args.join(" "));
+    debug!(
+        r#"Running "{} {}""#,
+        hmmbuild.display(),
+        hmmbuild_args.join(" ")
+    );
 
     if !res.status.success() {
         debug!("{}", String::from_utf8(res.stdout)?);
@@ -1860,7 +1861,11 @@ fn msa_protein(input_file: &Path, num_threads: usize) -> Result<PathBuf> {
     let mut hmmemit_cmd = std::process::Command::new(&hmmemit);
     let hmmemit_args = &["-c".to_string(), hmm_out.to_string_lossy().to_string()];
     let res = hmmemit_cmd.args(hmmemit_args).output()?;
-    debug!(r#"Running "{} {}""#, hmmemit.display(), hmmemit_args.join(" "));
+    debug!(
+        r#"Running "{} {}""#,
+        hmmemit.display(),
+        hmmemit_args.join(" ")
+    );
 
     if !res.status.success() {
         debug!("{}", String::from_utf8(res.stdout)?);
@@ -1904,9 +1909,6 @@ fn msa_dna(input_file: &Path, num_threads: usize) -> Result<PathBuf> {
 
     let start = Instant::now();
     let mut cmd = std::process::Command::new(&refiner);
-    //if let Some(perl5lib) = &args.perl5lib {
-    //    cmd.env("PERL5LIB", perl5lib);
-    //}
     let res = cmd.args(refiner_args).output()?;
     if !res.status.success() {
         debug!("{}", String::from_utf8(res.stdout)?);

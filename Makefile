@@ -2,6 +2,7 @@ MATRIX = $(shell pwd)/tests/inputs/matrices/25p41g.matrix
 
 run:
 	cargo run -- \
+		--alphabet               dna \
 		--outdir                 out-test \
 		--outfile                out-test/test.fa \
 		--consensi               tests/inputs/consensi.fa \
