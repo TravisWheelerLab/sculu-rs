@@ -57,10 +57,35 @@ impl ValueEnum for SequenceAlphabet {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    GenerateConfig,
+    Components,
+    Cluster,
+}
+
+impl ValueEnum for Action {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[Action::GenerateConfig, Action::Components, Action::Cluster]
+    }
+
+    fn to_possible_value<'a>(&self) -> Option<PossibleValue> {
+        Some(match self {
+            Action::GenerateConfig => PossibleValue::new("genconf"),
+            Action::Components => PossibleValue::new("components"),
+            Action::Cluster => PossibleValue::new("cluster"),
+        })
+    }
+}
+
 /// SCULU subfamily clustering tool
 #[derive(Debug, Parser)]
 #[command(version, about)]
 pub struct Args {
+    /// Sequence alphabet
+    #[arg(long, value_name = "ACTION")]
+    pub action: Option<Action>,
+
     /// Sequence alphabet
     #[arg(short, long, value_name = "ALPHABET", required = true)]
     pub alphabet: SequenceAlphabet,
@@ -85,6 +110,10 @@ pub struct Args {
     #[arg(long, value_name = "OUTFILE", default_value = "families.fa")]
     pub outfile: PathBuf,
 
+    /// Config file
+    #[arg(long, value_name = "CONFIG")]
+    pub config: Option<PathBuf>,
+
     /// Log output
     #[arg(long, value_name = "LOGFILE")]
     pub logfile: Option<String>,
@@ -105,48 +134,56 @@ pub struct Args {
     #[arg(long, value_name = "CONF", default_value = "3")]
     pub confidence_margin: isize,
 
-    // Path to RepeatModeler/Refiner
-    //#[arg(long, value_name = "REFINER")]
-    //pub refiner: Option<String>,
     /// Number of threads for rmblastn/Refiner
     #[arg(long, value_name = "THREADS")]
     pub num_threads: Option<usize>,
+}
 
-    /// Path to rmblastn
-    #[arg(long, value_name = "ALIGNER")]
-    pub aligner: Option<String>,
+/// Struct of sculu.toml file
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Config {
+    general: GeneralConfig,
+    rmblastn: RmblastnConfig,
+    blastp: BlastpConfig,
+}
 
-    /// Alignment matrix
-    #[arg(long, value_name = "MATRIX")]
-    pub align_matrix: Option<PathBuf>,
+/// "general" section of sculu.toml
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct GeneralConfig {
+    min_num_instances_dna: usize,
+    min_num_instances_prot: usize,
+}
 
-    /// Alignment gap open penalty
-    #[arg(long, value_name = "ALIGN_GAP_OPEN", default_value = "20")]
-    pub align_gap_open: usize,
+/// "blastp" section of sculu.toml
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct BlastpConfig {
+    matrix: Option<PathBuf>,
+    gap_open: usize,
+    gap_extend: usize,
+    word_size: usize,
+    mask_level: usize,
+    dust: bool,
+    complexity_adjust: bool,
+    min_raw_gapped_score: usize,
+    xdrop_gap: usize,
+    xdrop_ungap: usize,
+    xdrop_gap_final: usize,
+}
 
-    /// Alignment gap extension penalty
-    #[arg(long, value_name = "ALIGN_GAP_EXT", default_value = "5")]
-    pub align_gap_extension: usize,
-
-    /// Alignment word size
-    #[arg(long, value_name = "ALIGN_WORD_SIZE", default_value = "7")]
-    pub align_word_size: usize,
-
-    /// Alignment dust option
-    #[arg(long)]
-    pub align_dust: bool,
-
-    /// Alignment complexity adjust
-    #[arg(long)]
-    pub align_complexity_adjust: bool,
-
-    /// Alignment mask level
-    #[arg(long, value_name = "MASKLEVEL", default_value = "101")]
-    pub align_mask_level: i64,
-
-    /// Alignment minimum score
-    #[arg(long, value_name = "MINSCORE", default_value = "400")]
-    pub align_min_raw_gapped_score: i64,
+/// "rmblast" section of sculu.toml
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct RmblastnConfig {
+    matrix: Option<PathBuf>,
+    gap_open: usize,
+    gap_extend: usize,
+    word_size: usize,
+    mask_level: usize,
+    dust: bool,
+    complexity_adjust: bool,
+    min_raw_gapped_score: usize,
+    xdrop_gap: usize,
+    xdrop_ungap: usize,
+    xdrop_gap_final: usize,
 }
 
 #[derive(Debug, PartialEq)]
@@ -244,14 +281,16 @@ struct MergeFamilies<'a> {
 
 // --------------------------------------------------
 pub fn run(args: Args) -> Result<()> {
+    dbg!(&args);
+
+    let config = args
+        .config
+        .as_ref()
+        .map(|file| get_config(file))
+        .transpose()?;
+
     if !&args.outdir.is_dir() {
         fs::create_dir_all(&args.outdir)?;
-    }
-
-    if let Some(path) = &args.align_matrix {
-        if !path.is_file() {
-            bail!("--align-matrix '{}' does not exist", path.display());
-        }
     }
 
     let log_file = args
@@ -280,6 +319,7 @@ pub fn run(args: Args) -> Result<()> {
             family_to_instance,
             &args.instances,
             &args,
+            &config,
         )?;
         debug!(
             "'{}' merged into '{}'",
@@ -293,10 +333,10 @@ pub fn run(args: Args) -> Result<()> {
         fs::create_dir_all(&taken_instances_dir)?;
 
         let (consensi_file, family_to_instance) =
-            check_family_instances(&args, &taken_instances_dir)?;
+            check_family_instances(&args, &taken_instances_dir, &config)?;
 
         // This will only BLAST if there are no components from a previous run
-        let components = align_consensi_to_self(&consensi_file, &args)?;
+        let components = align_consensi_to_self(&consensi_file, &args, &config)?;
 
         // The user can bail after building the components in order to
         // process them concurrently.
@@ -330,6 +370,7 @@ pub fn run(args: Args) -> Result<()> {
                 family_to_instance.clone(),
                 &taken_instances_dir,
                 &args,
+                &config,
             )?;
 
             debug!(
@@ -351,6 +392,16 @@ pub fn run(args: Args) -> Result<()> {
 }
 
 // --------------------------------------------------
+/// Read the (optional) "sculu.toml" file
+fn get_config(config_file: &PathBuf) -> Result<Config> {
+    let mut file = open(config_file)?;
+    let mut contents = String::new();
+    let _bytes = file.read_to_string(&mut contents);
+    let config: Config = toml::from_str(&contents)?;
+    Ok(config)
+}
+
+// --------------------------------------------------
 // Align the consensi to itself to identify clusters, e.g.:
 // [
 //     [ "Charlie13a" ],
@@ -363,7 +414,11 @@ pub fn run(args: Args) -> Result<()> {
 // The other 1..N will be written to files "component-N"
 // Returns the component file paths
 //
-pub fn align_consensi_to_self(consensi: &Path, args: &Args) -> Result<Components> {
+pub fn align_consensi_to_self(
+    consensi: &Path,
+    args: &Args,
+    config: &Option<Config>,
+) -> Result<Components> {
     let components_dir = args.outdir.join("components");
     fs::create_dir_all(&components_dir)?;
 
@@ -378,9 +433,9 @@ pub fn align_consensi_to_self(consensi: &Path, args: &Args) -> Result<Components
         let blast_dir = args.outdir.join("consensi_cluster");
         let blast_out = match args.alphabet {
             SequenceAlphabet::Dna => {
-                run_rmblastn(&blast_dir, args, consensi, consensi)?
+                run_rmblastn(&blast_dir, args, consensi, consensi, config)?
             }
-            _ => run_blastp(&blast_dir, args, consensi, consensi)?,
+            _ => run_blastp(&blast_dir, args, consensi, consensi, config)?,
         };
 
         // There may be multiple hits per pair, take highest
@@ -561,6 +616,7 @@ fn merge_component(
     mut family_to_instance: HashMap<String, PathBuf>,
     taken_instances_dir: &PathBuf,
     args: &Args,
+    config: &Option<Config>,
 ) -> Result<PathBuf> {
     debug!("Merging component '{}'", component_file.display());
 
@@ -662,9 +718,9 @@ fn merge_component(
         // On future rounds, only the newly merged consensi will be present.
         let alignment_file = match args.alphabet {
             SequenceAlphabet::Dna => {
-                run_rmblastn(&round_dir, args, &batch_consensi, all_seqs_path)?
+                run_rmblastn(&round_dir, args, &batch_consensi, all_seqs_path, config)?
             }
-            _ => run_blastp(&round_dir, args, &batch_consensi, all_seqs_path)?,
+            _ => run_blastp(&round_dir, args, &batch_consensi, all_seqs_path, config)?,
         };
 
         // Extract the scores from the alignment file.
@@ -853,6 +909,7 @@ fn run_blastp(
     args: &Args,
     db: &Path,
     query: &Path,
+    config: &Option<Config>,
 ) -> Result<PathBuf> {
     fs::create_dir_all(outdir)?;
     let outfile = outdir.join("blast.tsv");
@@ -882,7 +939,9 @@ fn run_blastp(
             bail!(String::from_utf8(res.stderr)?);
         }
 
-        let mut blast_args = vec![
+        let blastp = which("blastp").map_err(|e| anyhow!("blastp: {e}"))?;
+        let mut cmd = std::process::Command::new(&blastp);
+        let mut blastp_args = vec![
             "-db".to_string(),
             db_path.to_string_lossy().to_string(),
             "-query".to_string(),
@@ -896,58 +955,63 @@ fn run_blastp(
             args.num_threads.unwrap_or(num_cpus::get()).to_string(),
             "-num_alignments".to_string(),
             "9999999".to_string(),
-            //"-gapopen".to_string(),
-            //args.align_gap_open.to_string(),
-            //"-gapextend".to_string(),
-            //args.align_gap_extension.to_string(),
-            //"-word_size".to_string(),
-            //args.align_word_size.to_string(),
-            //"-xdrop_ungap".to_string(),
-            //(args.align_min_raw_gapped_score * 2).to_string(),
-            //"-xdrop_gap".to_string(),
-            //(args.align_min_raw_gapped_score / 2).to_string(),
-            //"-xdrop_gap_final".to_string(),
-            //args.align_min_raw_gapped_score.to_string(),
         ];
 
-        //"-mask_level".to_string(),
-        //args.align_mask_level.to_string(),
-        //"-min_raw_gapped_score".to_string(),
-        //args.align_min_raw_gapped_score.to_string(),
-        //"-dust".to_string(),
-        //if args.align_dust {
-        //    "yes".to_string()
-        //} else {
-        //    "no".to_string()
-        //},
+        if let Some(conf) = config.as_ref().map(|c| c.blastp.clone()) {
+            blastp_args.extend_from_slice(&[
+                "-gapopen".to_string(),
+                conf.gap_open.to_string(),
+                "-gapextend".to_string(),
+                conf.gap_extend.to_string(),
+                "-word_size".to_string(),
+                conf.word_size.to_string(),
+                "-xdrop_ungap".to_string(),
+                (conf.min_raw_gapped_score * 2).to_string(),
+                "-xdrop_gap".to_string(),
+                (conf.min_raw_gapped_score / 2).to_string(),
+                "-xdrop_gap_final".to_string(),
+                conf.min_raw_gapped_score.to_string(),
+                "-mask_level".to_string(),
+                conf.mask_level.to_string(),
+                "-min_raw_gapped_score".to_string(),
+                conf.min_raw_gapped_score.to_string(),
+                "-dust".to_string(),
+                if conf.dust {
+                    "yes".to_string()
+                } else {
+                    "no".to_string()
+                },
+            ]);
 
-        if args.align_complexity_adjust {
-            blast_args.push("-complexity_adjust".to_string());
+            if conf.complexity_adjust {
+                blastp_args.push("-complexity_adjust".to_string());
+            }
+
+            if let Some(matrix) = conf.matrix {
+                if !matrix.is_file() {
+                    bail!("blastp matrix '{}' does not exist", matrix.display());
+                }
+
+                let matrix_filename = matrix.file_name().unwrap_or_else(|| {
+                    panic!("Failed to get filename from '{}'", matrix.display())
+                });
+
+                let matrix_dir = matrix.parent().unwrap_or_else(|| {
+                    panic!("Failed to get dirname from '{}'", matrix.display())
+                });
+
+                cmd.env("BLASTMAT", matrix_dir);
+                blastp_args.extend_from_slice(&[
+                    "-matrix".to_string(),
+                    matrix_filename.to_string_lossy().to_string(),
+                ]);
+            }
         }
 
-        let blastp = which("blastp").map_err(|e| anyhow!("blastp: {e}"))?;
-        let mut cmd = std::process::Command::new(&blastp);
-
-        //if let Some(matrix) = &args.align_matrix {
-        //    let matrix_filename = matrix.file_name().unwrap_or_else(|| {
-        //        panic!("Failed to get filename from '{}'", matrix.display())
-        //    });
-        //
-        //    let matrix_dir = matrix.parent().unwrap_or_else(|| {
-        //        panic!("Failed to get dirname from '{}'", matrix.display())
-        //    });
-        //
-        //    cmd.env("BLASTMAT", matrix_dir);
-        //    blast_args.extend_from_slice(&[
-        //        "-matrix".to_string(),
-        //        matrix_filename.to_string_lossy().to_string(),
-        //    ]);
-        //}
-
-        debug!("Running '{} {}'", blastp.display(), blast_args.join(" "));
+        debug!("Running '{} {}'", blastp.display(), blastp_args.join(" "));
 
         let start = Instant::now();
-        let res = cmd.args(blast_args).output()?;
+        let res = cmd.args(blastp_args).output()?;
         if !res.status.success() {
             bail!(String::from_utf8(res.stderr)?);
         }
@@ -967,6 +1031,7 @@ fn run_rmblastn(
     args: &Args,
     db: &Path,
     query: &Path,
+    config: &Option<Config>,
 ) -> Result<PathBuf> {
     fs::create_dir_all(outdir)?;
     let outfile = outdir.join("blast.tsv");
@@ -996,6 +1061,8 @@ fn run_rmblastn(
             bail!(String::from_utf8(res.stderr)?);
         }
 
+        let rmblastn = which("rmblastn").map_err(|e| anyhow!("rmblastn: {e}"))?;
+        let mut cmd = std::process::Command::new(&rmblastn);
         let mut rmblastn_args = vec![
             "-db".to_string(),
             db_path.to_string_lossy().to_string(),
@@ -1010,55 +1077,57 @@ fn run_rmblastn(
             args.num_threads.unwrap_or(num_cpus::get()).to_string(),
             "-num_alignments".to_string(),
             "9999999".to_string(),
-            "-mask_level".to_string(),
-            args.align_mask_level.to_string(),
-            "-gapopen".to_string(),
-            args.align_gap_open.to_string(),
-            "-gapextend".to_string(),
-            args.align_gap_extension.to_string(),
-            "-word_size".to_string(),
-            args.align_word_size.to_string(),
-            "-min_raw_gapped_score".to_string(),
-            args.align_min_raw_gapped_score.to_string(),
-            "-xdrop_ungap".to_string(),
-            (args.align_min_raw_gapped_score * 2).to_string(),
-            "-xdrop_gap".to_string(),
-            (args.align_min_raw_gapped_score / 2).to_string(),
-            "-xdrop_gap_final".to_string(),
-            args.align_min_raw_gapped_score.to_string(),
-            "-dust".to_string(),
-            if args.align_dust {
-                "yes".to_string()
-            } else {
-                "no".to_string()
-            },
         ];
 
-        if args.align_complexity_adjust {
-            rmblastn_args.push("-complexity_adjust".to_string());
-        }
-
-        let rmblastn = match &args.aligner {
-            Some(path) => PathBuf::from(path.to_string()),
-            _ => which("rmblastn").map_err(|e| anyhow!("rmblastn: {e}"))?,
-        };
-
-        let mut cmd = std::process::Command::new(&rmblastn);
-
-        if let Some(matrix) = &args.align_matrix {
-            let matrix_filename = matrix.file_name().unwrap_or_else(|| {
-                panic!("Failed to get filename from '{}'", matrix.display())
-            });
-
-            let matrix_dir = matrix.parent().unwrap_or_else(|| {
-                panic!("Failed to get dirname from '{}'", matrix.display())
-            });
-
-            cmd.env("BLASTMAT", matrix_dir);
+        if let Some(conf) = config.as_ref().map(|c| c.rmblastn.clone()) {
             rmblastn_args.extend_from_slice(&[
-                "-matrix".to_string(),
-                matrix_filename.to_string_lossy().to_string(),
+                "-mask_level".to_string(),
+                conf.mask_level.to_string(),
+                "-gapopen".to_string(),
+                conf.gap_open.to_string(),
+                "-gapextend".to_string(),
+                conf.gap_extend.to_string(),
+                "-word_size".to_string(),
+                conf.word_size.to_string(),
+                "-min_raw_gapped_score".to_string(),
+                conf.min_raw_gapped_score.to_string(),
+                "-xdrop_ungap".to_string(),
+                (conf.min_raw_gapped_score * 2).to_string(),
+                "-xdrop_gap".to_string(),
+                (conf.min_raw_gapped_score / 2).to_string(),
+                "-xdrop_gap_final".to_string(),
+                conf.min_raw_gapped_score.to_string(),
+                "-dust".to_string(),
+                if conf.dust {
+                    "yes".to_string()
+                } else {
+                    "no".to_string()
+                },
             ]);
+
+            if conf.complexity_adjust {
+                rmblastn_args.push("-complexity_adjust".to_string());
+            }
+
+            if let Some(matrix) = conf.matrix {
+                if !matrix.is_file() {
+                    bail!("Rmblast matrix '{}' does not exist", matrix.display());
+                }
+
+                let matrix_filename = matrix.file_name().unwrap_or_else(|| {
+                    panic!("Failed to get filename from '{}'", matrix.display())
+                });
+
+                let matrix_dir = matrix.parent().unwrap_or_else(|| {
+                    panic!("Failed to get dirname from '{}'", matrix.display())
+                });
+
+                cmd.env("BLASTMAT", matrix_dir);
+                rmblastn_args.extend_from_slice(&[
+                    "-matrix".to_string(),
+                    matrix_filename.to_string_lossy().to_string(),
+                ]);
+            }
         }
 
         debug!(
@@ -1243,6 +1312,7 @@ fn cat_sequences(
 fn check_family_instances(
     args: &Args,
     taken_instances_dir: &Path,
+    config: &Option<Config>,
 ) -> Result<(PathBuf, HashMap<String, PathBuf>)> {
     debug!("Checking consensi_file '{}'", args.consensi.display());
 
@@ -1274,6 +1344,7 @@ fn check_family_instances(
                     &taken_path,
                     &working_dir,
                     args,
+                    config,
                 ) {
                     eprintln!("Warning: {e}");
                 }
@@ -1353,6 +1424,7 @@ fn select_instances(
     to_path: &PathBuf,
     working_dir: &Path,
     args: &Args,
+    config: &Option<Config>,
 ) -> Result<usize> {
     let min_num_instances = match args.alphabet {
         SequenceAlphabet::Dna => MIN_NUM_INSTANCES_DNA,
@@ -1403,8 +1475,10 @@ fn select_instances(
 
     // BLAST the instances to the consensus
     let blast_out = match args.alphabet {
-        SequenceAlphabet::Dna => run_rmblastn(&blast_dir, args, &db_path, from_path)?,
-        _ => run_blastp(&blast_dir, args, &db_path, from_path)?,
+        SequenceAlphabet::Dna => {
+            run_rmblastn(&blast_dir, args, &db_path, from_path, config)?
+        }
+        _ => run_blastp(&blast_dir, args, &db_path, from_path, config)?,
     };
     let alignments = parse_alignment(&blast_out)?;
 
