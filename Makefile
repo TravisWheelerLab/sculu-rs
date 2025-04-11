@@ -1,7 +1,6 @@
-MATRIX = $(shell pwd)/tests/inputs/matrices/25p41g.matrix
-
 run:
 	cargo run -- \
+		--config                 sculu.toml \
 		--alphabet               dna \
 		--outdir                 out-test \
 		--outfile                out-test/test.fa \
@@ -9,10 +8,10 @@ run:
 		--instances              tests/inputs/instances \
 		--independence-threshold .8 \
 		--confidence-margin      3 \
-		--align-matrix           $(MATRIX) 
 
 mfs:
 	cargo run -- \
+		--config    sculu.toml \
 		--alphabet  protein \
 		--logfile   - \
 		--outdir    out-mfs \
@@ -21,6 +20,7 @@ mfs:
 
 pf:
 	cargo run -- \
+		--config    sculu.toml \
 		--alphabet  protein \
 		--outdir    pfam \
 		--consensi  ~/wheelerlab/data/proteins/pfam/consensi.fa \
@@ -28,29 +28,29 @@ pf:
 
 dup:
 	cargo run -- \
+		--config    sculu.toml \
 		--instances tests/inputs/instances \
-		--consensi tests/inputs/dup_consensi.fa 
+		--consensi  tests/inputs/dup_consensi.fa 
 
 alu:
 	cargo run -- \
-		--consensi     data/alu/alu_consensi.fa \
-		--instances    data/alu/subfams \
-		--outfile      ./alu-out/final-alu.fa \
-		--outdir       ./alu-out \
-		--align-matrix $(MATRIX) 
+		--config    sculu.toml \
+		--consensi  data/alu/alu_consensi.fa \
+		--instances data/alu/subfams \
+		--outfile   ./alu-out/final-alu.fa \
+		--outdir    ./alu-out \
 
 mix:
 	cargo run -- \
-		--outdir     out-mixed \
-		--consensi   data/mixed/consensi.fa \
-		--instances  data/mixed/instances \
-		--outfile    final-mixed.fa \
-		--align-matrix $(MATRIX)
-
+		--config    sculu.toml \
+		--outdir    out-mixed \
+		--consensi  data/mixed/consensi.fa \
+		--instances data/mixed/instances \
+		--outfile   final-mixed.fa \
 
 tua1:
 	cargo run -- \
-        --align-matrix $(MATRIX) \
+		--config    sculu.toml \
 		--build-components-only \
 		--logfile   - \
         --outdir    tuatara-out \
@@ -60,12 +60,12 @@ tua1:
 
 tua2:
 	cargo run -- \
-        --align-matrix $(MATRIX) \
-        --outdir       tuatara-out \
-        --logfile      - \
-        --component    tuatara-out/components/component-007 \
-        --instances    tuatara-out/instances \
-        --consensi     tuatara-out/consensi.fa
+		--config    sculu.toml \
+        --outdir    tuatara-out \
+        --logfile   - \
+        --component tuatara-out/components/component-007 \
+        --instances tuatara-out/instances \
+        --consensi  tuatara-out/consensi.fa
 
 clean:
 	rm -rf RM_* makedb.log
