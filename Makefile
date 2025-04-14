@@ -1,5 +1,6 @@
 run:
-	cargo run -- \
+	cargo run -- --logfile - \
+		run \
 		--config                 sculu.toml \
 		--alphabet               dna \
 		--outdir                 out-test \
@@ -8,6 +9,29 @@ run:
 		--instances              tests/inputs/instances \
 		--independence-threshold .8 \
 		--confidence-margin      3 \
+
+build:
+	cargo run -- --logfile - \
+		components \
+		--config                 sculu.toml \
+		--alphabet               dna \
+		--outdir                 out-test \
+		--outfile                out-test/test.fa \
+		--consensi               tests/inputs/consensi.fa \
+		--instances              tests/inputs/instances \
+		--independence-threshold .8 \
+		--confidence-margin      3 \
+
+cluster:
+	cargo run -- --logfile - \
+		cluster \
+		--config                 sculu.toml \
+		--alphabet               dna \
+		--outdir                 out-test \
+		--outfile                out-test/test.fa \
+		--consensi               tests/inputs/consensi.fa \
+		--instances              tests/inputs/instances \
+		--component              out-test/components/component-0
 
 mfs:
 	cargo run -- \

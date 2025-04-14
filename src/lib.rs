@@ -57,35 +57,71 @@ impl ValueEnum for SequenceAlphabet {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Action {
-    GenerateConfig,
-    Components,
-    Cluster,
-}
+#[derive(Parser, Debug)]
+pub enum Command {
+    /// Generate config TOML
+    Config(ConfigArgs),
 
-impl ValueEnum for Action {
-    fn value_variants<'a>() -> &'a [Self] {
-        &[Action::GenerateConfig, Action::Components, Action::Cluster]
-    }
+    /// Build components
+    Components(Args),
 
-    fn to_possible_value<'a>(&self) -> Option<PossibleValue> {
-        Some(match self {
-            Action::GenerateConfig => PossibleValue::new("genconf"),
-            Action::Components => PossibleValue::new("components"),
-            Action::Cluster => PossibleValue::new("cluster"),
-        })
-    }
+    /// Cluster components
+    Cluster(Args),
+
+    /// Concatenate singletons and components
+    Concat(ConcatArgs),
+
+    /// Run all steps
+    Run(Args),
 }
 
 /// SCULU subfamily clustering tool
-#[derive(Debug, Parser)]
-#[command(version, about)]
-pub struct Args {
-    /// Sequence alphabet
-    #[arg(long, value_name = "ACTION")]
-    pub action: Option<Action>,
+#[derive(Parser, Debug)]
+#[command(arg_required_else_help = true, version, about)]
+pub struct Cli {
+    /// SCULU command
+    #[command(subcommand)]
+    pub command: Option<Command>,
 
+    /// Log output
+    #[arg(long, value_name = "LOGFILE")]
+    pub logfile: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+#[command()]
+pub struct ConfigArgs {
+    /// Output file
+    #[arg(value_name = "OUTFILE", default_value = "sculu.toml")]
+    pub outfile: PathBuf,
+}
+
+#[derive(Debug, Parser)]
+#[command()]
+pub struct ConcatArgs {
+    /// Output file
+    #[arg(short, long, value_name = "OUTFILE", required = true)]
+    pub outfile: PathBuf,
+
+    /// FASTA file of subfamily consensi
+    #[arg(long, value_name = "CONSENSI", required = true)]
+    pub consensi: PathBuf,
+
+    /// Singletons file
+    #[arg(long, value_name = "SINGLETONS")]
+    pub singletons: Option<PathBuf>,
+
+    /// Singletons file
+    #[arg(long, value_name = "COMPONENTS", num_args = 0..)]
+    pub components: Vec<PathBuf>,
+}
+
+#[derive(Debug, Parser, Clone)]
+#[command()]
+pub struct Args {
+    // Sequence alphabet
+    //#[arg(long, value_name = "ACTION")]
+    //pub action: Option<>,
     /// Sequence alphabet
     #[arg(short, long, value_name = "ALPHABET", required = true)]
     pub alphabet: SequenceAlphabet,
@@ -113,10 +149,6 @@ pub struct Args {
     /// Config file
     #[arg(long, value_name = "CONFIG")]
     pub config: Option<PathBuf>,
-
-    /// Log output
-    #[arg(long, value_name = "LOGFILE")]
-    pub logfile: Option<String>,
 
     /// Stop after building components
     #[arg(long, conflicts_with = "component")]
@@ -238,8 +270,8 @@ struct Independence {
 
 #[derive(Debug)]
 pub struct Components {
-    singletons: Option<PathBuf>,
-    components: Vec<PathBuf>,
+    pub singletons: Option<PathBuf>,
+    pub components: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -280,8 +312,53 @@ struct MergeFamilies<'a> {
 }
 
 // --------------------------------------------------
-pub fn run(args: Args) -> Result<()> {
-    dbg!(&args);
+pub fn write_config(args: &ConfigArgs) -> Result<()> {
+    let config = Config {
+        general: GeneralConfig {
+            min_num_instances_dna: 10,
+            min_num_instances_prot: 1,
+        },
+        blastp: BlastpConfig {
+            matrix: Some(PathBuf::from("/path/to/matrix.txt")),
+            gap_open: 20,
+            gap_extend: 5,
+            word_size: 7,
+            mask_level: 101,
+            min_raw_gapped_score: 400,
+            xdrop_gap: 800,
+            xdrop_ungap: 200,
+            xdrop_gap_final: 400,
+            dust: false,
+            complexity_adjust: false,
+        },
+        rmblastn: RmblastnConfig {
+            matrix: Some(PathBuf::from("/path/to/matrix.txt")),
+            gap_open: 20,
+            gap_extend: 5,
+            word_size: 7,
+            mask_level: 101,
+            min_raw_gapped_score: 400,
+            xdrop_gap: 800,
+            xdrop_ungap: 200,
+            xdrop_gap_final: 400,
+            dust: false,
+            complexity_adjust: false,
+        },
+    };
+
+    if args.outfile.exists() {
+        bail!(r#"Will not overwrite "{}""#, args.outfile.display());
+    }
+
+    let mut outfile = open_for_write(&args.outfile)?;
+    writeln!(&mut outfile, "{}", toml::to_string(&config)?)?;
+    println!(r#"Wrote "{}""#, args.outfile.display());
+    Ok(())
+}
+
+// --------------------------------------------------
+pub fn build_components(args: &Args) -> Result<Components> {
+    //debug!("Build components\n{args:?}");
 
     let config = args
         .config
@@ -293,20 +370,78 @@ pub fn run(args: Args) -> Result<()> {
         fs::create_dir_all(&args.outdir)?;
     }
 
-    let log_file = args
-        .logfile
-        .clone()
-        .unwrap_or(args.outdir.join("debug.log").to_string_lossy().to_string());
+    let taken_instances_dir = args.outdir.join("instances");
+    fs::create_dir_all(&taken_instances_dir)?;
 
-    env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Debug)
-        .target(match log_file.as_str() {
-            "-" => env_logger::Target::Stdout,
-            path => env_logger::Target::Pipe(Box::new(BufWriter::new(
-                File::create(path).map_err(|e| anyhow!("{path}: {e}"))?,
-            ))),
-        })
-        .init();
+    let (consensi_file, _family_to_instance) =
+        check_family_instances(&args, &taken_instances_dir, &config)?;
+
+    // This will only BLAST if there are no components from a previous run
+    let components = align_consensi_to_self(&consensi_file, &args, &config)?;
+    let num_components = components.components.len();
+    debug!(
+        "Built {num_components} component{}",
+        if num_components == 1 { "" } else { "s" }
+    );
+
+    Ok(components)
+}
+
+// --------------------------------------------------
+pub fn process_component(args: &Args) -> Result<PathBuf> {
+    //debug!("Process components\n{args:?}");
+
+    let component_file = args
+        .component
+        .clone()
+        .unwrap_or_else(|| panic!("Missing component"));
+
+    let config = args
+        .config
+        .as_ref()
+        .map(|file| get_config(file))
+        .transpose()?;
+
+    if !&args.outdir.is_dir() {
+        fs::create_dir_all(&args.outdir)?;
+    }
+
+    // If given an component file to process, assume the
+    // consensi and instances have been properly filtered
+    // and use given args as-is.
+    let family_to_instance = read_instances_dir(&args.instances)?;
+
+    let merged = merge_component(
+        &component_file,
+        &args.consensi,
+        family_to_instance,
+        &args.instances,
+        &args,
+        &config,
+    )?;
+
+    debug!(
+        "'{}' merged into '{}'",
+        component_file.display(),
+        merged.display()
+    );
+
+    Ok(merged)
+}
+
+// --------------------------------------------------
+pub fn run(args: &Args) -> Result<()> {
+    dbg!(&args);
+
+    let config = args
+        .config
+        .as_ref()
+        .map(|file| get_config(file))
+        .transpose()?;
+
+    if !&args.outdir.is_dir() {
+        fs::create_dir_all(&args.outdir)?;
+    }
 
     if let Some(ref component_file) = args.component {
         // If given an component file to process, assume the
@@ -387,6 +522,37 @@ pub fn run(args: Args) -> Result<()> {
 
         println!("See output file '{}'", args.outfile.display());
     }
+
+    Ok(())
+}
+
+// --------------------------------------------------
+pub fn concat_files(
+    consensi: &PathBuf,
+    singletons: &Option<PathBuf>,
+    merged: &Vec<PathBuf>,
+    outfile: &PathBuf,
+) -> Result<()> {
+    let mut fasta_writer = FastaWriter::new(BufWriter::new(open_for_write(&outfile)?));
+
+    if let Some(file) = singletons {
+        let singletons = read_lines(&file)?;
+        debug!(
+            "Copying {} sequences from singletons file",
+            singletons.len()
+        );
+        copy_fasta(&singletons, consensi, &mut fasta_writer)?;
+    }
+
+    for component_file in merged {
+        debug!(r#"Copying from "{}""#, component_file.display());
+        let mut reader = FastaReader::new(BufReader::new(open(&component_file)?));
+        for record in reader.records().map_while(Result::ok) {
+            fasta_writer.write_record(&record)?;
+        }
+    }
+
+    debug!(r#"Final output written to "{}""#, outfile.display());
 
     Ok(())
 }
@@ -611,7 +777,7 @@ fn copy_fasta<W: Write>(
 
 // --------------------------------------------------
 fn merge_component(
-    component_file: &Path,
+    component_file: &PathBuf,
     consensi_file: &Path,
     mut family_to_instance: HashMap<String, PathBuf>,
     taken_instances_dir: &PathBuf,
