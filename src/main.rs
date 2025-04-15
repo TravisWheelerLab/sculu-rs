@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
-use sculu::{Cli, Command};
+use sculu::{Cli, ClusterArgs, Command, ComponentsArgs};
 use std::{
     fs::{self, File},
     io::BufWriter,
@@ -18,6 +18,7 @@ fn main() {
 // --------------------------------------------------
 fn run(args: Cli) -> Result<()> {
     let log_file = args.logfile.unwrap_or(PathBuf::from("debug.log"));
+    let num_threads = args.num_threads.unwrap_or(num_cpus::get());
 
     if let Some(dir) = log_file.parent() {
         if !dir.exists() {
@@ -42,11 +43,11 @@ fn run(args: Cli) -> Result<()> {
             Ok(())
         }
         Some(Command::Components(args)) => {
-            sculu::build_components(args)?;
+            sculu::build_components(args, num_threads)?;
             Ok(())
         }
         Some(Command::Cluster(args)) => {
-            sculu::process_component(args)?;
+            sculu::process_component(args, num_threads)?;
             Ok(())
         }
         Some(Command::Concat(args)) => {
@@ -59,18 +60,37 @@ fn run(args: Cli) -> Result<()> {
             Ok(())
         }
         Some(Command::Run(args)) => {
-            let components = sculu::build_components(args)?;
+            let built_components = sculu::build_components(
+                &ComponentsArgs {
+                    alphabet: args.alphabet.clone(),
+                    consensi: args.consensi.clone(),
+                    instances: args.instances.clone(),
+                    outdir: args.outdir.clone(),
+                    config: args.config.clone(),
+                },
+                num_threads,
+            )?;
+
             let mut merged: Vec<PathBuf> = vec![];
-            for component in components.components {
-                let mut process_args = args.clone();
-                process_args.component = Some(component);
-                let res = sculu::process_component(&process_args)?;
+            for component in built_components.components {
+                let res = sculu::process_component(
+                    &ClusterArgs {
+                        alphabet: args.alphabet.clone(),
+                        consensi: built_components.consensi.clone(),
+                        instances: built_components.instances_dir.clone(),
+                        outdir: args.outdir.clone(),
+                        config: args.config.clone(),
+                        component,
+                    },
+                    num_threads,
+                )?;
+
                 merged.push(res);
             }
 
             let _ = sculu::concat_files(
-                &args.consensi,
-                &components.singletons,
+                &built_components.consensi,
+                &built_components.singletons,
                 &merged,
                 &args.outfile,
             )?;

@@ -29,15 +29,6 @@ use std::{
 };
 use which::which;
 
-const MIN_INSTANCE_SEQUENCE_LENGTH_DNA: usize = 30;
-const MIN_INSTANCE_SEQUENCE_LENGTH_PROT: usize = 12;
-const MIN_CONSENSUS_COVERAGE: usize = 5;
-const MAX_NUM_INSTANCES: usize = 100;
-const MIN_NUM_INSTANCES_DNA: usize = 10;
-const MIN_NUM_INSTANCES_PROT: usize = 1;
-const MIN_LEN_SIMILARITY: f64 = 0.9;
-const MIN_ALIGN_COVER: f64 = 0.9;
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum SequenceAlphabet {
     Dna,
@@ -63,16 +54,16 @@ pub enum Command {
     Config(ConfigArgs),
 
     /// Build components
-    Components(Args),
+    Components(ComponentsArgs),
 
     /// Cluster components
-    Cluster(Args),
+    Cluster(ClusterArgs),
 
     /// Concatenate singletons and components
     Concat(ConcatArgs),
 
     /// Run all steps
-    Run(Args),
+    Run(RunArgs),
 }
 
 /// SCULU subfamily clustering tool
@@ -86,6 +77,10 @@ pub struct Cli {
     /// Log output
     #[arg(long, value_name = "LOGFILE")]
     pub logfile: Option<PathBuf>,
+
+    /// Number of threads for rmblastn/Refiner
+    #[arg(long, value_name = "THREADS")]
+    pub num_threads: Option<usize>,
 }
 
 #[derive(Debug, Parser)]
@@ -118,10 +113,7 @@ pub struct ConcatArgs {
 
 #[derive(Debug, Parser, Clone)]
 #[command()]
-pub struct Args {
-    // Sequence alphabet
-    //#[arg(long, value_name = "ACTION")]
-    //pub action: Option<>,
+pub struct RunArgs {
     /// Sequence alphabet
     #[arg(short, long, value_name = "ALPHABET", required = true)]
     pub alphabet: SequenceAlphabet,
@@ -149,26 +141,58 @@ pub struct Args {
     /// Config file
     #[arg(long, value_name = "CONFIG")]
     pub config: Option<PathBuf>,
+}
 
-    /// Stop after building components
-    #[arg(long, conflicts_with = "component")]
-    pub build_components_only: bool,
+#[derive(Debug, Parser, Clone)]
+#[command()]
+pub struct ComponentsArgs {
+    /// Sequence alphabet
+    #[arg(short, long, value_name = "ALPHABET", required = true)]
+    pub alphabet: SequenceAlphabet,
 
-    /// Lambda value
-    #[arg(long, value_name = "LAMBDA", default_value = "0.1227")]
-    pub lambda: f64,
+    /// FASTA file of subfamily consensi
+    #[arg(long, value_name = "CONSENSI", required = true)]
+    pub consensi: PathBuf,
 
-    /// Independence threshold
-    #[arg(long, value_name = "IND", default_value = "0.5")]
-    pub independence_threshold: f64,
+    /// Directory of instance files for each subfamily
+    #[arg(long, value_name = "INSTANCES", required = true)]
+    pub instances: PathBuf,
 
-    /// Confidence margin
-    #[arg(long, value_name = "CONF", default_value = "3")]
-    pub confidence_margin: isize,
+    /// Output directory
+    #[arg(long, value_name = "OUTDIR", default_value = "sculu-out")]
+    pub outdir: PathBuf,
 
-    /// Number of threads for rmblastn/Refiner
-    #[arg(long, value_name = "THREADS")]
-    pub num_threads: Option<usize>,
+    /// Config file
+    #[arg(long, value_name = "CONFIG")]
+    pub config: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser, Clone)]
+#[command()]
+pub struct ClusterArgs {
+    /// Sequence alphabet
+    #[arg(short, long, value_name = "ALPHABET", required = true)]
+    pub alphabet: SequenceAlphabet,
+
+    /// FASTA file of subfamily consensi
+    #[arg(long, value_name = "CONSENSI", required = true)]
+    pub consensi: PathBuf,
+
+    /// Directory of instance files for each subfamily
+    #[arg(long, value_name = "INSTANCES", required = true)]
+    pub instances: PathBuf,
+
+    /// Components file from "cluster" action
+    #[arg(long, value_name = "COMPONENT", required = true)]
+    pub component: PathBuf,
+
+    /// Output directory
+    #[arg(long, value_name = "OUTDIR")]
+    pub outdir: PathBuf,
+
+    /// Config file
+    #[arg(long, value_name = "CONFIG")]
+    pub config: Option<PathBuf>,
 }
 
 /// Struct of sculu.toml file
@@ -182,6 +206,15 @@ pub struct Config {
 /// "general" section of sculu.toml
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct GeneralConfig {
+    confidence_margin: isize,
+    independence_threshold: f64,
+    lambda: f64,
+    max_num_instances: usize,
+    min_align_cover: f64,
+    min_consensus_coverage: usize,
+    min_instance_sequence_length_dna: usize,
+    min_instance_sequence_length_prot: usize,
+    min_len_similarity: f64,
     min_num_instances_dna: usize,
     min_num_instances_prot: usize,
 }
@@ -274,6 +307,14 @@ pub struct Components {
     pub components: Vec<PathBuf>,
 }
 
+#[derive(Debug)]
+pub struct BuiltComponents {
+    pub singletons: Option<PathBuf>,
+    pub components: Vec<PathBuf>,
+    pub consensi: PathBuf,
+    pub instances_dir: PathBuf,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct StringPair(String, String);
 
@@ -312,9 +353,18 @@ struct MergeFamilies<'a> {
 }
 
 // --------------------------------------------------
-pub fn write_config(args: &ConfigArgs) -> Result<()> {
-    let config = Config {
+fn default_config() -> Config {
+    Config {
         general: GeneralConfig {
+            confidence_margin: 3,
+            independence_threshold: 0.5,
+            lambda: 0.1227,
+            max_num_instances: 100,
+            min_align_cover: 0.9,
+            min_consensus_coverage: 5,
+            min_instance_sequence_length_dna: 30,
+            min_instance_sequence_length_prot: 12,
+            min_len_similarity: 0.9,
             min_num_instances_dna: 10,
             min_num_instances_prot: 1,
         },
@@ -344,27 +394,30 @@ pub fn write_config(args: &ConfigArgs) -> Result<()> {
             dust: false,
             complexity_adjust: false,
         },
-    };
+    }
+}
 
+// --------------------------------------------------
+pub fn write_config(args: &ConfigArgs) -> Result<()> {
     if args.outfile.exists() {
         bail!(r#"Will not overwrite "{}""#, args.outfile.display());
     }
 
     let mut outfile = open_for_write(&args.outfile)?;
-    writeln!(&mut outfile, "{}", toml::to_string(&config)?)?;
+    writeln!(&mut outfile, "{}", toml::to_string(&default_config())?)?;
     println!(r#"Wrote "{}""#, args.outfile.display());
     Ok(())
 }
 
 // --------------------------------------------------
-pub fn build_components(args: &Args) -> Result<Components> {
-    //debug!("Build components\n{args:?}");
-
-    let config = args
-        .config
-        .as_ref()
-        .map(|file| get_config(file))
-        .transpose()?;
+pub fn build_components(
+    args: &ComponentsArgs,
+    num_threads: usize,
+) -> Result<BuiltComponents> {
+    let config = match args.config.as_ref() {
+        Some(file) => get_config(&file)?,
+        _ => default_config(),
+    };
 
     if !&args.outdir.is_dir() {
         fs::create_dir_all(&args.outdir)?;
@@ -373,34 +426,45 @@ pub fn build_components(args: &Args) -> Result<Components> {
     let taken_instances_dir = args.outdir.join("instances");
     fs::create_dir_all(&taken_instances_dir)?;
 
-    let (consensi_file, _family_to_instance) =
-        check_family_instances(&args, &taken_instances_dir, &config)?;
+    let (consensi_file, _family_to_instance) = check_family_instances(
+        &args.consensi,
+        &args.instances,
+        &args.outdir,
+        &taken_instances_dir,
+        &config,
+        &args.alphabet,
+        num_threads,
+    )?;
 
     // This will only BLAST if there are no components from a previous run
-    let components = align_consensi_to_self(&consensi_file, &args, &config)?;
+    let components = align_consensi_to_self(
+        &consensi_file,
+        &args.outdir,
+        &args.alphabet,
+        &config,
+        num_threads,
+    )?;
     let num_components = components.components.len();
     debug!(
         "Built {num_components} component{}",
         if num_components == 1 { "" } else { "s" }
     );
 
-    Ok(components)
+    Ok(BuiltComponents {
+        singletons: components.singletons,
+        components: components.components,
+        consensi: consensi_file,
+        instances_dir: taken_instances_dir,
+    })
 }
 
 // --------------------------------------------------
-pub fn process_component(args: &Args) -> Result<PathBuf> {
-    //debug!("Process components\n{args:?}");
-
-    let component_file = args
-        .component
-        .clone()
-        .unwrap_or_else(|| panic!("Missing component"));
-
-    let config = args
-        .config
-        .as_ref()
-        .map(|file| get_config(file))
-        .transpose()?;
+pub fn process_component(args: &ClusterArgs, num_threads: usize) -> Result<PathBuf> {
+    let component_file = &args.component;
+    let config = match args.config.as_ref() {
+        Some(file) => get_config(&file)?,
+        _ => default_config(),
+    };
 
     if !&args.outdir.is_dir() {
         fs::create_dir_all(&args.outdir)?;
@@ -412,12 +476,14 @@ pub fn process_component(args: &Args) -> Result<PathBuf> {
     let family_to_instance = read_instances_dir(&args.instances)?;
 
     let merged = merge_component(
+        &args.outdir,
+        &args.alphabet,
         &component_file,
         &args.consensi,
         family_to_instance,
         &args.instances,
-        &args,
         &config,
+        num_threads,
     )?;
 
     debug!(
@@ -427,103 +493,6 @@ pub fn process_component(args: &Args) -> Result<PathBuf> {
     );
 
     Ok(merged)
-}
-
-// --------------------------------------------------
-pub fn run(args: &Args) -> Result<()> {
-    dbg!(&args);
-
-    let config = args
-        .config
-        .as_ref()
-        .map(|file| get_config(file))
-        .transpose()?;
-
-    if !&args.outdir.is_dir() {
-        fs::create_dir_all(&args.outdir)?;
-    }
-
-    if let Some(ref component_file) = args.component {
-        // If given an component file to process, assume the
-        // consensi and instances have been properly filtered
-        // and use given args as-is.
-        let family_to_instance = read_instances_dir(&args.instances)?;
-        let merged = merge_component(
-            component_file,
-            &args.consensi,
-            family_to_instance,
-            &args.instances,
-            &args,
-            &config,
-        )?;
-        debug!(
-            "'{}' merged into '{}'",
-            component_file.display(),
-            merged.display()
-        );
-    } else {
-        // If in this branch, we start from scratch and vet the instances
-        // and consensi sequences before starting.
-        let taken_instances_dir = args.outdir.join("instances");
-        fs::create_dir_all(&taken_instances_dir)?;
-
-        let (consensi_file, family_to_instance) =
-            check_family_instances(&args, &taken_instances_dir, &config)?;
-
-        // This will only BLAST if there are no components from a previous run
-        let components = align_consensi_to_self(&consensi_file, &args, &config)?;
-
-        // The user can bail after building the components in order to
-        // process them concurrently.
-        if args.build_components_only {
-            return Ok(());
-        }
-
-        let mut fasta_writer =
-            FastaWriter::new(BufWriter::new(open_for_write(&args.outfile)?));
-
-        if let Some(file) = components.singletons {
-            let singletons = read_lines(&file)?;
-            debug!("Copying {} from singletons file", singletons.len());
-            copy_fasta(&singletons, &args.consensi, &mut fasta_writer)?;
-        }
-
-        debug!(
-            "Processing {} component{}",
-            components.components.len(),
-            if components.components.len() == 1 {
-                ""
-            } else {
-                "s"
-            }
-        );
-
-        for component_file in components.components {
-            let outfile = merge_component(
-                &component_file,
-                &consensi_file,
-                family_to_instance.clone(),
-                &taken_instances_dir,
-                &args,
-                &config,
-            )?;
-
-            debug!(
-                "'{}' merged into '{}'",
-                component_file.display(),
-                outfile.display()
-            );
-
-            let mut reader = FastaReader::new(BufReader::new(open(&outfile)?));
-            for record in reader.records().map_while(Result::ok) {
-                fasta_writer.write_record(&record)?;
-            }
-        }
-
-        println!("See output file '{}'", args.outfile.display());
-    }
-
-    Ok(())
 }
 
 // --------------------------------------------------
@@ -582,13 +551,16 @@ fn get_config(config_file: &PathBuf) -> Result<Config> {
 //
 pub fn align_consensi_to_self(
     consensi: &Path,
-    args: &Args,
-    config: &Option<Config>,
+    out_dir: &PathBuf,
+    alphabet: &SequenceAlphabet,
+    config: &Config,
+    num_threads: usize,
 ) -> Result<Components> {
-    let components_dir = args.outdir.join("components");
+    let components_dir = out_dir.join("components");
     fs::create_dir_all(&components_dir)?;
 
-    let num_components = fs::read_dir(&components_dir)?
+    let num_components = fs::read_dir(&components_dir)
+        .map_err(|e| anyhow!(r#"Failed to read "{}": {e}"#, components_dir.display()))?
         .filter_map(|entry| entry.ok())
         .collect::<Vec<_>>()
         .len();
@@ -596,17 +568,17 @@ pub fn align_consensi_to_self(
     if num_components > 0 {
         debug!("Reusing existing component files");
     } else {
-        let blast_dir = args.outdir.join("consensi_cluster");
-        let blast_out = match args.alphabet {
+        let blast_dir = out_dir.join("consensi_cluster");
+        let blast_out = match alphabet {
             SequenceAlphabet::Dna => {
-                run_rmblastn(&blast_dir, args, consensi, consensi, config)?
+                run_rmblastn(&blast_dir, consensi, consensi, config, num_threads)?
             }
-            _ => run_blastp(&blast_dir, args, consensi, consensi, config)?,
+            _ => run_blastp(&blast_dir, consensi, consensi, config, num_threads)?,
         };
 
         // There may be multiple hits per pair, take highest
         let best_alignments = blast_dir.join("best.tsv");
-        take_best_alignments(&blast_out, &best_alignments)?;
+        take_best_alignments(&blast_out, &best_alignments, config)?;
 
         // Filter out: Hits to self, insufficient coverage
         let alignment_file = components_dir.join("alignment.tsv");
@@ -671,7 +643,11 @@ pub fn align_consensi_to_self(
 
     let mut singletons: Option<PathBuf> = None;
     let mut components = vec![];
-    for entry in fs::read_dir(&components_dir)? {
+    let entries = fs::read_dir(&components_dir).map_err(|e| {
+        anyhow!(r#"Failed to read "{}": {e}"#, components_dir.display())
+    })?;
+
+    for entry in entries {
         let entry = entry?;
         let file_name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path().to_path_buf();
@@ -693,7 +669,11 @@ pub fn align_consensi_to_self(
 }
 
 // --------------------------------------------------
-fn take_best_alignments(blast_out: &PathBuf, output: &PathBuf) -> Result<()> {
+fn take_best_alignments(
+    blast_out: &PathBuf,
+    output: &PathBuf,
+    config: &Config,
+) -> Result<()> {
     let now = Instant::now();
 
     if fs::metadata(output).map_or(0, |meta| meta.len()) > 0 {
@@ -727,10 +707,11 @@ fn take_best_alignments(blast_out: &PathBuf, output: &PathBuf) -> Result<()> {
             let query_coverage = query_span as f64 / record.query_len as f64;
             let subject_coverage = subject_span as f64 / record.subject_len as f64;
             let equiv_len = min(query_span, subject_span) as f64
-                >= (MIN_LEN_SIMILARITY * max(query_span, subject_span) as f64);
+                >= (config.general.min_len_similarity
+                    * max(query_span, subject_span) as f64);
 
-            if query_coverage >= MIN_ALIGN_COVER
-                && subject_coverage >= MIN_ALIGN_COVER
+            if query_coverage >= config.general.min_align_cover
+                && subject_coverage >= config.general.min_align_cover
                 && equiv_len
             {
                 let pair = StringPair(record.query.clone(), record.target.clone());
@@ -777,12 +758,14 @@ fn copy_fasta<W: Write>(
 
 // --------------------------------------------------
 fn merge_component(
+    out_dir: &PathBuf,
+    alphabet: &SequenceAlphabet,
     component_file: &PathBuf,
     consensi_file: &Path,
     mut family_to_instance: HashMap<String, PathBuf>,
     taken_instances_dir: &PathBuf,
-    args: &Args,
-    config: &Option<Config>,
+    config: &Config,
+    num_threads: usize,
 ) -> Result<PathBuf> {
     debug!("Merging component '{}'", component_file.display());
 
@@ -817,7 +800,7 @@ fn merge_component(
         .unwrap()
         .to_string_lossy()
         .to_string();
-    let batch_dir = args.outdir.join(&component_name);
+    let batch_dir = out_dir.join(&component_name);
     fs::create_dir_all(&batch_dir)?;
 
     debug!(
@@ -882,11 +865,21 @@ fn merge_component(
         // Align all the sequences to the current consensi.
         // On the first round, all the original consensi will be included.
         // On future rounds, only the newly merged consensi will be present.
-        let alignment_file = match args.alphabet {
-            SequenceAlphabet::Dna => {
-                run_rmblastn(&round_dir, args, &batch_consensi, all_seqs_path, config)?
-            }
-            _ => run_blastp(&round_dir, args, &batch_consensi, all_seqs_path, config)?,
+        let alignment_file = match alphabet {
+            SequenceAlphabet::Dna => run_rmblastn(
+                &round_dir,
+                &batch_consensi,
+                all_seqs_path,
+                config,
+                num_threads,
+            )?,
+            _ => run_blastp(
+                &round_dir,
+                &batch_consensi,
+                all_seqs_path,
+                config,
+                num_threads,
+            )?,
         };
 
         // Extract the scores from the alignment file.
@@ -900,7 +893,11 @@ fn merge_component(
         prev_scores = Some(scores_file.clone());
 
         // Find the clear/ambiguous winners from the scores
-        let winners = call_winners(&scores_file, args.lambda, args.confidence_margin)?;
+        let winners = call_winners(
+            &scores_file,
+            config.general.lambda,
+            config.general.confidence_margin,
+        )?;
 
         // Determine independence of all pairs
         let pair_independence = independence(winners);
@@ -917,7 +914,7 @@ fn merge_component(
         // Select only those pair lacking independence
         let non_independent: Vec<_> = pair_independence
             .iter()
-            .filter(|v| v.val < args.independence_threshold)
+            .filter(|v| v.val < config.general.independence_threshold)
             .collect();
 
         debug!("{} family pair not independent.", non_independent.len());
@@ -977,8 +974,8 @@ fn merge_component(
                     family2: pair.f2.clone(),
                     outdir: msa_dir.to_path_buf(),
                     taken_instances_dir,
-                    num_threads: args.num_threads.unwrap_or(num_cpus::get()),
-                    alphabet: args.alphabet.clone(),
+                    num_threads,
+                    alphabet: alphabet.clone(),
                     flipped: flipped_pairs
                         .contains(&StringPair::new(pair.f1.clone(), pair.f2.clone())),
                 },
@@ -1071,19 +1068,19 @@ fn parse_alignment(blast_out: &PathBuf) -> Result<Vec<RmBlastOutput>> {
 
 // --------------------------------------------------
 fn run_blastp(
-    outdir: &PathBuf,
-    args: &Args,
+    out_dir: &PathBuf,
     db: &Path,
     query: &Path,
-    config: &Option<Config>,
+    config: &Config,
+    num_threads: usize,
 ) -> Result<PathBuf> {
-    fs::create_dir_all(outdir)?;
-    let outfile = outdir.join("blast.tsv");
+    fs::create_dir_all(out_dir)?;
+    let outfile = out_dir.join("blast.tsv");
 
     if outfile.exists() {
         debug!("Reusing BLAST output file '{}'", outfile.display());
     } else {
-        let db_path = &outdir.join("db");
+        let db_path = &out_dir.join("db");
         let makeblastdb_args = &[
             "-out".to_string(),
             db_path.to_string_lossy().to_string(),
@@ -1118,60 +1115,55 @@ fn run_blastp(
             "6 score qseqid sseqid qlen qstart qend slen sstart send cpg_kdiv pident"
                 .to_string(),
             "-num_threads".to_string(),
-            args.num_threads.unwrap_or(num_cpus::get()).to_string(),
+            num_threads.to_string(),
             "-num_alignments".to_string(),
             "9999999".to_string(),
+            "-gapopen".to_string(),
+            config.blastp.gap_open.to_string(),
+            "-gapextend".to_string(),
+            config.blastp.gap_extend.to_string(),
+            "-word_size".to_string(),
+            config.blastp.word_size.to_string(),
+            "-xdrop_ungap".to_string(),
+            (config.blastp.min_raw_gapped_score * 2).to_string(),
+            "-xdrop_gap".to_string(),
+            (config.blastp.min_raw_gapped_score / 2).to_string(),
+            "-xdrop_gap_final".to_string(),
+            config.blastp.min_raw_gapped_score.to_string(),
+            "-mask_level".to_string(),
+            config.blastp.mask_level.to_string(),
+            "-min_raw_gapped_score".to_string(),
+            config.blastp.min_raw_gapped_score.to_string(),
+            "-dust".to_string(),
+            if config.blastp.dust {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
         ];
 
-        if let Some(conf) = config.as_ref().map(|c| c.blastp.clone()) {
+        if config.blastp.complexity_adjust {
+            blastp_args.push("-complexity_adjust".to_string());
+        }
+
+        if let Some(matrix) = config.blastp.matrix.as_ref() {
+            if !matrix.is_file() {
+                bail!("blastp matrix '{}' does not exist", matrix.display());
+            }
+
+            let matrix_filename = matrix.file_name().unwrap_or_else(|| {
+                panic!("Failed to get filename from '{}'", matrix.display())
+            });
+
+            let matrix_dir = matrix.parent().unwrap_or_else(|| {
+                panic!("Failed to get dirname from '{}'", matrix.display())
+            });
+
+            cmd.env("BLASTMAT", matrix_dir);
             blastp_args.extend_from_slice(&[
-                "-gapopen".to_string(),
-                conf.gap_open.to_string(),
-                "-gapextend".to_string(),
-                conf.gap_extend.to_string(),
-                "-word_size".to_string(),
-                conf.word_size.to_string(),
-                "-xdrop_ungap".to_string(),
-                (conf.min_raw_gapped_score * 2).to_string(),
-                "-xdrop_gap".to_string(),
-                (conf.min_raw_gapped_score / 2).to_string(),
-                "-xdrop_gap_final".to_string(),
-                conf.min_raw_gapped_score.to_string(),
-                "-mask_level".to_string(),
-                conf.mask_level.to_string(),
-                "-min_raw_gapped_score".to_string(),
-                conf.min_raw_gapped_score.to_string(),
-                "-dust".to_string(),
-                if conf.dust {
-                    "yes".to_string()
-                } else {
-                    "no".to_string()
-                },
+                "-matrix".to_string(),
+                matrix_filename.to_string_lossy().to_string(),
             ]);
-
-            if conf.complexity_adjust {
-                blastp_args.push("-complexity_adjust".to_string());
-            }
-
-            if let Some(matrix) = conf.matrix {
-                if !matrix.is_file() {
-                    bail!("blastp matrix '{}' does not exist", matrix.display());
-                }
-
-                let matrix_filename = matrix.file_name().unwrap_or_else(|| {
-                    panic!("Failed to get filename from '{}'", matrix.display())
-                });
-
-                let matrix_dir = matrix.parent().unwrap_or_else(|| {
-                    panic!("Failed to get dirname from '{}'", matrix.display())
-                });
-
-                cmd.env("BLASTMAT", matrix_dir);
-                blastp_args.extend_from_slice(&[
-                    "-matrix".to_string(),
-                    matrix_filename.to_string_lossy().to_string(),
-                ]);
-            }
         }
 
         debug!("Running '{} {}'", blastp.display(), blastp_args.join(" "));
@@ -1193,19 +1185,19 @@ fn run_blastp(
 
 // --------------------------------------------------
 fn run_rmblastn(
-    outdir: &PathBuf,
-    args: &Args,
+    out_dir: &PathBuf,
     db: &Path,
     query: &Path,
-    config: &Option<Config>,
+    config: &Config,
+    num_threads: usize,
 ) -> Result<PathBuf> {
-    fs::create_dir_all(outdir)?;
-    let outfile = outdir.join("blast.tsv");
+    fs::create_dir_all(out_dir)?;
+    let outfile = out_dir.join("blast.tsv");
 
     if outfile.exists() {
         debug!("Reusing BLAST output file '{}'", outfile.display());
     } else {
-        let db_path = &outdir.join("db");
+        let db_path = &out_dir.join("db");
         let makeblastdb_args = &[
             "-out".to_string(),
             db_path.to_string_lossy().to_string(),
@@ -1240,60 +1232,55 @@ fn run_rmblastn(
             "6 score qseqid sseqid qlen qstart qend slen sstart send cpg_kdiv pident"
                 .to_string(),
             "-num_threads".to_string(),
-            args.num_threads.unwrap_or(num_cpus::get()).to_string(),
+            num_threads.to_string(),
             "-num_alignments".to_string(),
             "9999999".to_string(),
+            "-mask_level".to_string(),
+            config.rmblastn.mask_level.to_string(),
+            "-gapopen".to_string(),
+            config.rmblastn.gap_open.to_string(),
+            "-gapextend".to_string(),
+            config.rmblastn.gap_extend.to_string(),
+            "-word_size".to_string(),
+            config.rmblastn.word_size.to_string(),
+            "-min_raw_gapped_score".to_string(),
+            config.rmblastn.min_raw_gapped_score.to_string(),
+            "-xdrop_ungap".to_string(),
+            (config.rmblastn.min_raw_gapped_score * 2).to_string(),
+            "-xdrop_gap".to_string(),
+            (config.rmblastn.min_raw_gapped_score / 2).to_string(),
+            "-xdrop_gap_final".to_string(),
+            config.rmblastn.min_raw_gapped_score.to_string(),
+            "-dust".to_string(),
+            if config.rmblastn.dust {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            },
         ];
 
-        if let Some(conf) = config.as_ref().map(|c| c.rmblastn.clone()) {
+        if config.rmblastn.complexity_adjust {
+            rmblastn_args.push("-complexity_adjust".to_string());
+        }
+
+        if let Some(matrix) = config.rmblastn.matrix.as_ref() {
+            if !matrix.is_file() {
+                bail!("Rmblast matrix '{}' does not exist", matrix.display());
+            }
+
+            let matrix_filename = matrix.file_name().unwrap_or_else(|| {
+                panic!("Failed to get filename from '{}'", matrix.display())
+            });
+
+            let matrix_dir = matrix.parent().unwrap_or_else(|| {
+                panic!("Failed to get dirname from '{}'", matrix.display())
+            });
+
+            cmd.env("BLASTMAT", matrix_dir);
             rmblastn_args.extend_from_slice(&[
-                "-mask_level".to_string(),
-                conf.mask_level.to_string(),
-                "-gapopen".to_string(),
-                conf.gap_open.to_string(),
-                "-gapextend".to_string(),
-                conf.gap_extend.to_string(),
-                "-word_size".to_string(),
-                conf.word_size.to_string(),
-                "-min_raw_gapped_score".to_string(),
-                conf.min_raw_gapped_score.to_string(),
-                "-xdrop_ungap".to_string(),
-                (conf.min_raw_gapped_score * 2).to_string(),
-                "-xdrop_gap".to_string(),
-                (conf.min_raw_gapped_score / 2).to_string(),
-                "-xdrop_gap_final".to_string(),
-                conf.min_raw_gapped_score.to_string(),
-                "-dust".to_string(),
-                if conf.dust {
-                    "yes".to_string()
-                } else {
-                    "no".to_string()
-                },
+                "-matrix".to_string(),
+                matrix_filename.to_string_lossy().to_string(),
             ]);
-
-            if conf.complexity_adjust {
-                rmblastn_args.push("-complexity_adjust".to_string());
-            }
-
-            if let Some(matrix) = conf.matrix {
-                if !matrix.is_file() {
-                    bail!("Rmblast matrix '{}' does not exist", matrix.display());
-                }
-
-                let matrix_filename = matrix.file_name().unwrap_or_else(|| {
-                    panic!("Failed to get filename from '{}'", matrix.display())
-                });
-
-                let matrix_dir = matrix.parent().unwrap_or_else(|| {
-                    panic!("Failed to get dirname from '{}'", matrix.display())
-                });
-
-                cmd.env("BLASTMAT", matrix_dir);
-                rmblastn_args.extend_from_slice(&[
-                    "-matrix".to_string(),
-                    matrix_filename.to_string_lossy().to_string(),
-                ]);
-            }
         }
 
         debug!(
@@ -1442,7 +1429,10 @@ fn cat_sequences(
     outpath: &PathBuf,
 ) -> Result<()> {
     let mut output = open_for_write(outpath)?;
-    for entry in fs::read_dir(instances_dir)? {
+    let entries = fs::read_dir(&instances_dir)
+        .map_err(|e| anyhow!(r#"Failed to read "{}": {e}"#, instances_dir.display()))?;
+
+    for entry in entries {
         let file = entry?;
         let family_name = file
             .path()
@@ -1476,23 +1466,29 @@ fn cat_sequences(
 // are most representative of the family, and then it will filter
 // the consensi for those that have sufficient supporting instances.
 fn check_family_instances(
-    args: &Args,
+    consensi: &PathBuf,
+    instances_dir: &PathBuf,
+    out_dir: &PathBuf,
     taken_instances_dir: &Path,
-    config: &Option<Config>,
+    config: &Config,
+    alphabet: &SequenceAlphabet,
+    num_threads: usize,
 ) -> Result<(PathBuf, HashMap<String, PathBuf>)> {
-    debug!("Checking consensi_file '{}'", args.consensi.display());
+    debug!("Checking consensi_file '{}'", consensi.display());
 
     // Find all the input instance files
-    let instances: Vec<_> = fs::read_dir(&args.instances)?
+    let instances: Vec<_> = fs::read_dir(&instances_dir)
+        .map_err(|e| anyhow!(r#"Failed to read "{}": {e}"#, instances_dir.display()))?
         .map_while(Result::ok)
         .collect();
+
     debug!(
         "Found {} instance files in '{}'",
         instances.len(),
-        args.instances.display(),
+        instances_dir.display(),
     );
 
-    let working_dir = args.outdir.join("select");
+    let working_dir = out_dir.join("select");
     fs::create_dir_all(&working_dir)?;
 
     let now = Instant::now();
@@ -1504,13 +1500,14 @@ fn check_family_instances(
             if !family_name.starts_with(".") {
                 let taken_path = taken_instances_dir.join(format!("{family_name}.fa"));
                 if let Err(e) = select_instances(
-                    &args.consensi.to_path_buf(),
+                    &consensi,
                     &family_name,
                     &instance_path,
                     &taken_path,
                     &working_dir,
-                    args,
+                    alphabet,
                     config,
+                    num_threads,
                 ) {
                     eprintln!("Warning: {e}");
                 }
@@ -1532,9 +1529,9 @@ fn check_family_instances(
     debug!("Finished instance selection in {:?}", now.elapsed());
 
     // Create a new consensi file containing only the families that have instances
-    let taken_consensi_path = args.outdir.join("consensi.fa");
+    let taken_consensi_path = out_dir.join("consensi.fa");
     let mut out_consensi = open_for_write(&taken_consensi_path)?;
-    let mut reader = parse_reader(open(&args.consensi)?)?;
+    let mut reader = parse_reader(open(&consensi)?)?;
     let mut consensi_names: HashMap<String, u32> = HashMap::new();
     while let Some(rec) = reader.iter_record()? {
         let family = rec.head().to_string();
@@ -1570,7 +1567,10 @@ fn check_family_instances(
 fn read_instances_dir(instances_dir: &Path) -> Result<HashMap<String, PathBuf>> {
     // Create hashmap from family name to taken instance file
     let mut family_to_instance: HashMap<String, PathBuf> = HashMap::new();
-    for entry in fs::read_dir(instances_dir)? {
+    let entries = fs::read_dir(instances_dir)
+        .map_err(|e| anyhow!(r#"Failed to read "{}": {e}"#, instances_dir.display()))?;
+
+    for entry in entries {
         let entry = entry?;
         if let Some(stem) = entry.path().file_stem() {
             let family_name = stem.to_string_lossy().to_string();
@@ -1589,13 +1589,15 @@ fn select_instances(
     from_path: &PathBuf,
     to_path: &PathBuf,
     working_dir: &Path,
-    args: &Args,
-    config: &Option<Config>,
+    alphabet: &SequenceAlphabet,
+    config: &Config,
+    num_threads: usize,
 ) -> Result<usize> {
-    let min_num_instances = match args.alphabet {
-        SequenceAlphabet::Dna => MIN_NUM_INSTANCES_DNA,
-        _ => MIN_NUM_INSTANCES_PROT,
+    let min_num_instances = match alphabet {
+        SequenceAlphabet::Dna => config.general.min_num_instances_dna,
+        _ => config.general.min_num_instances_prot,
     };
+
     if to_path.is_file() {
         let mut reader = FastaReader::new(open(to_path)?);
         let num = reader.records().count();
@@ -1640,19 +1642,19 @@ fn select_instances(
         .map(|rec| rec.sequence().len())?;
 
     // BLAST the instances to the consensus
-    let blast_out = match args.alphabet {
+    let blast_out = match alphabet {
         SequenceAlphabet::Dna => {
-            run_rmblastn(&blast_dir, args, &db_path, from_path, config)?
+            run_rmblastn(&blast_dir, &db_path, from_path, config, num_threads)?
         }
-        _ => run_blastp(&blast_dir, args, &db_path, from_path, config)?,
+        _ => run_blastp(&blast_dir, &db_path, from_path, config, num_threads)?,
     };
     let alignments = parse_alignment(&blast_out)?;
 
     // Remove short alignments, find the highest score for each hit
     let mut targets: HashMap<String, usize> = HashMap::new();
-    let min_len = match args.alphabet {
-        SequenceAlphabet::Dna => MIN_INSTANCE_SEQUENCE_LENGTH_DNA,
-        _ => MIN_INSTANCE_SEQUENCE_LENGTH_PROT,
+    let min_len = match alphabet {
+        SequenceAlphabet::Dna => config.general.min_instance_sequence_length_dna,
+        _ => config.general.min_instance_sequence_length_prot,
     };
 
     for aln in alignments.iter().filter(|aln| aln.query_len >= min_len) {
@@ -1696,7 +1698,7 @@ fn select_instances(
         // Exit if target number of instances (100?)
         // AND the coverage depth target ("coverageReached") has been met.
         // OR if we've exhausted the best/worse arrays
-        if wanted.len() >= MAX_NUM_INSTANCES && coverage_reached
+        if wanted.len() >= config.general.max_num_instances && coverage_reached
             || ((i == best.len()) && (j == worst.len()))
         {
             break;
@@ -1732,7 +1734,7 @@ fn select_instances(
         // depth target (10), set flag ("coverageReached")
         coverage_reached = consensus_cov
             .iter()
-            .all(|val| *val >= MIN_CONSENSUS_COVERAGE);
+            .all(|val| *val >= config.general.min_consensus_coverage);
     }
 
     let mut num_taken = 0;

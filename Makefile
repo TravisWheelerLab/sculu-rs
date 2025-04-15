@@ -6,9 +6,7 @@ run:
 		--outdir                 out-test \
 		--outfile                out-test/test.fa \
 		--consensi               tests/inputs/consensi.fa \
-		--instances              tests/inputs/instances \
-		--independence-threshold .8 \
-		--confidence-margin      3 \
+		--instances              tests/inputs/instances 
 
 build:
 	cargo run -- --logfile - \
@@ -16,11 +14,8 @@ build:
 		--config                 sculu.toml \
 		--alphabet               dna \
 		--outdir                 out-test \
-		--outfile                out-test/test.fa \
 		--consensi               tests/inputs/consensi.fa \
-		--instances              tests/inputs/instances \
-		--independence-threshold .8 \
-		--confidence-margin      3 \
+		--instances              tests/inputs/instances
 
 cluster:
 	cargo run -- --logfile - \
@@ -28,10 +23,16 @@ cluster:
 		--config                 sculu.toml \
 		--alphabet               dna \
 		--outdir                 out-test \
-		--outfile                out-test/test.fa \
-		--consensi               tests/inputs/consensi.fa \
-		--instances              tests/inputs/instances \
+		--consensi               out-test/consensi.fa \
+		--instances              out-test/instances \
 		--component              out-test/components/component-0
+
+concat:
+	cargo run -- --logfile - \
+		concat \
+		--outfile    out-test/families.fa \
+		--consensi   out-test/consensi.fa \
+		--components out-test/component-0/final.fa
 
 mfs:
 	cargo run -- \
@@ -57,12 +58,14 @@ dup:
 		--consensi  tests/inputs/dup_consensi.fa 
 
 alu:
-	cargo run -- \
+	cargo run -- --logfile - \
+		run \
+		--alphabet  dna \
 		--config    sculu.toml \
-		--consensi  data/alu/alu_consensi.fa \
-		--instances data/alu/subfams \
-		--outfile   ./alu-out/final-alu.fa \
-		--outdir    ./alu-out \
+		--consensi  ~/wheelerlab/data/alu/consensi.fa \
+		--instances ~/wheelerlab/data/alu/instances \
+		--outfile   ./alu-out/families.fa \
+		--outdir    ./alu-out
 
 mix:
 	cargo run -- \
@@ -72,24 +75,15 @@ mix:
 		--instances data/mixed/instances \
 		--outfile   final-mixed.fa \
 
-tua1:
-	cargo run -- \
+tua:
+	cargo run -- --logfile - \
+		run \
+		--alphabet  dna \
 		--config    sculu.toml \
-		--build-components-only \
-		--logfile   - \
         --outdir    tuatara-out \
         --outfile   tuatara-out/new-consensi.fa \
         --instances ~/wheelerlab/tuatara/instances \
         --consensi  ~/wheelerlab/tuatara/consensi.fa
-
-tua2:
-	cargo run -- \
-		--config    sculu.toml \
-        --outdir    tuatara-out \
-        --logfile   - \
-        --component tuatara-out/components/component-007 \
-        --instances tuatara-out/instances \
-        --consensi  tuatara-out/consensi.fa
 
 clean:
 	rm -rf RM_* makedb.log
