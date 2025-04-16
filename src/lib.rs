@@ -53,16 +53,16 @@ pub enum Command {
     /// Generate config TOML
     Config(ConfigArgs),
 
-    /// Build components
+    /// Align consensi to self and create "components"
     Components(ComponentsArgs),
 
-    /// Cluster components
+    /// Cluster output from "components"
     Cluster(ClusterArgs),
 
-    /// Concatenate singletons and components
+    /// Concatenate singletons from "components" and output from "cluster"
     Concat(ConcatArgs),
 
-    /// Run all steps
+    /// Run all steps (components, cluster, concat)
     Run(RunArgs),
 }
 
@@ -98,15 +98,15 @@ pub struct ConcatArgs {
     #[arg(short, long, value_name = "OUTFILE", required = true)]
     pub outfile: PathBuf,
 
-    /// FASTA file of subfamily consensi
+    /// The filtered FASTA consensi from "components"
     #[arg(long, value_name = "CONSENSI", required = true)]
     pub consensi: PathBuf,
 
-    /// Singletons file
+    /// Singletons file from "components"
     #[arg(long, value_name = "SINGLETONS")]
     pub singletons: Option<PathBuf>,
 
-    /// Singletons file
+    /// Merged components from "cluster"
     #[arg(long, value_name = "COMPONENTS", num_args = 0..)]
     pub components: Vec<PathBuf>,
 }
@@ -126,7 +126,7 @@ pub struct RunArgs {
     #[arg(long, value_name = "INSTANCES", required = true)]
     pub instances: PathBuf,
 
-    /// Components file from "cluster" action
+    /// One file from the "components" action
     #[arg(long, value_name = "COMPONENT")]
     pub component: Option<PathBuf>,
 
@@ -174,15 +174,15 @@ pub struct ClusterArgs {
     #[arg(short, long, value_name = "ALPHABET", required = true)]
     pub alphabet: SequenceAlphabet,
 
-    /// FASTA file of subfamily consensi
+    /// The filtered FASTA consensi from "components"
     #[arg(long, value_name = "CONSENSI", required = true)]
     pub consensi: PathBuf,
 
-    /// Directory of instance files for each subfamily
+    /// Directory of filtered instance files from "components"
     #[arg(long, value_name = "INSTANCES", required = true)]
     pub instances: PathBuf,
 
-    /// Components file from "cluster" action
+    /// A file from "components" action
     #[arg(long, value_name = "COMPONENT", required = true)]
     pub component: PathBuf,
 
@@ -2409,13 +2409,14 @@ mod tests {
         let fasta = PathBuf::from("tests/inputs/AluY_5.fa");
         let tmp_dir = tempdir()?;
         let outpath = tmp_dir.path().join("sub.fa");
+        let rev_comp = false;
 
         // Scoped to force close of output filehandle
         {
             let out = File::create(&outpath)?;
 
             // Select 3 of the 5 sequences
-            let res = downsample(&fasta, 3, &out);
+            let res = downsample(&fasta, 3, rev_comp, &out);
             assert!(res.is_ok());
             assert_eq!(res.unwrap(), 3);
         }
@@ -2436,7 +2437,7 @@ mod tests {
         // Should only get the actual 5
         {
             let out = File::create(&outpath)?;
-            let res = downsample(&fasta, 10, &out);
+            let res = downsample(&fasta, 10, rev_comp, &out);
             assert!(res.is_ok());
             assert_eq!(res.unwrap(), 5);
         }
