@@ -1,0 +1,38 @@
+[general]
+confidence_margin = 3
+independence_threshold = 0.5
+lambda = 0.1227
+max_num_instances = 100
+min_align_cover = 0.9
+min_consensus_coverage = 5
+min_instance_sequence_length_dna = 30
+min_instance_sequence_length_prot = 12
+min_len_similarity = 0.9
+min_num_instances_dna = 10
+min_num_instances_prot = 1
+
+[rmblastn]
+matrix = "tests/inputs/matrices/25p41g.matrix"
+gap_open = 20
+gap_extend = 5
+word_size = 7
+mask_level = 101
+dust = false
+complexity_adjust = false
+min_raw_gapped_score = 400
+xdrop_gap = 800
+xdrop_ungap = 200
+xdrop_gap_final = 400
+
+[blastp]
+gap_open = 20
+gap_extend = 5
+word_size = 7
+mask_level = 101
+dust = false
+complexity_adjust = false
+min_raw_gapped_score = 400
+xdrop_gap = 800
+xdrop_ungap = 200
+xdrop_gap_final = 400
+
