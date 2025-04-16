@@ -203,7 +203,7 @@ NOTE: The consensi sequence names *must* match the filenames of the _instances_ 
 This step aligns the consensi sequences to themselves using `rmblastn` for DNA
 and `blastp` for protein.
 
-The directory structure of this step will be:
+The output directory structure of this step will be:
 
 ```
 $ tree sculu-out -L 1
@@ -215,7 +215,7 @@ sculu-out
 └── select
 ```
 
-* _components_: This directory contains the consensi found to be sufficiently similar according to the settings in the configuration. Consensi sequences that are not similar to *any* others are placed into a _singletons_ file that is needed for the final _concat_ step.  The files are named _component-N_ (for N from 0 to the number of components) and will contain the consensi sequence/family names. *These files are the inputs to the next step of clustering.*
+* _components_: This directory contains the consensi found to be sufficiently similar according to the settings in the configuration. Consensi sequences that are not similar to *any* others are placed into a _singletons_ file that is needed for the final _concat_ step.  The files are named _component-N_ (for N from 0 to the number of components) and will contain the consensi sequence/family names. 
 * _consensi.fa_: This file contains only consensi supported by sufficient instances.
 * _consensi_cluster_: This directory contains the result of clustering the consensi.
 * _instances_: This directory contains downsampled instances filtered to those of the best quality.
