@@ -26,6 +26,7 @@ From Audrey's MS thesis:
 SCULU requires several external tools to compare DNA/protein sequences and
 generate new consensi sequences:
 
+* Rust: https://www.rust-lang.org/tools/install
 * `RepeatModeler`: https://github.com/Dfam-consortium/RepeatModeler
 * `RepeatMasker`: https://www.repeatmasker.org/RepeatMasker/
 * `rmblastn`: https://www.repeatmasker.org/rmblast/
@@ -175,8 +176,7 @@ the provided instances.
 If you find it takes longer than you like to use `run`, then you may wish to
 execute the discrete steps that follow to parallelize the clustering step over
 additional hardware.
-A Nextflow wrapper has been provided to assist in distributing this step on an
-HPC.
+A [Nextflow](https://github.com/TravisWheelerLab/sculu-nf) wrapper has been provided to assist in distributing this step on an HPC.
 
 ## Generate Components/Singletons
 
@@ -362,6 +362,10 @@ Finally, when the loop exits after all consensi merges, write a new consensi fil
 
 - Run **`tar xvf tests/inputs/alignment.tgz`**
 - Run **`cargo test`**
+
+## See Also
+
+* https://github.com/TravisWheelerLab/sculu-nf
 
 ## Authors
 
