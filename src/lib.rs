@@ -1401,7 +1401,9 @@ fn call_winners(
             let threshold = top_conf * (1. / confidence_margin as f64);
             let winning_set: Vec<_> = fam_comps
                 .iter()
-                .filter_map(|(&conf, fam)| (conf > threshold).then_some(fam))
+                .filter_map(|(&confidence, fam)| {
+                    (confidence >= threshold).then_some(fam)
+                })
                 .collect();
 
             // The permutations will include A/B and B/A
@@ -1409,7 +1411,7 @@ fn call_winners(
             // Even though this is a duplication of the data
             for pair in winning_set.into_iter().permutations(2) {
                 if let [&f1, &f2] = pair[..] {
-                    let key = StringPair::new(f1.to_string(), f2.to_string());
+                    let key = StringPair(f1.to_string(), f2.to_string());
                     winning_sets.entry(key).and_modify(|v| *v += 1).or_insert(1);
                 }
             }
@@ -2461,10 +2463,11 @@ mod tests {
     fn test_extract_scores() -> Result<()> {
         let outdir = tempdir()?;
         let consensi = PathBuf::from("tests/inputs/numbered_consensi.fa".to_string());
-        let alignment_file = PathBuf::from("tests/inputs/blast.out");
+        let alignment_file = PathBuf::from("tests/inputs/blast.tsv");
         let prev_scores: Option<PathBuf> = None;
         let res =
             extract_scores(&alignment_file, &prev_scores, &consensi, outdir.path());
+        dbg!(&res);
         assert!(res.is_ok());
 
         let scores_file = res.unwrap();
@@ -2652,23 +2655,41 @@ mod tests {
         assert!(res.is_ok());
 
         let alignments = res.unwrap();
-        assert_eq!(alignments.len(), 100);
+        assert_eq!(alignments.len(), 1000);
 
         let first = alignments.first().unwrap();
         assert_eq!(
             first,
             &RmBlastOutput {
-                score: 194,
-                target: "tuafam234757_consensus".to_string(),
-                query: "tuafam085443_consensus".to_string(),
-                query_len: 291,
-                query_start: 247,
-                query_end: 284,
-                subject_len: 501,
-                subject_start: 63,
-                subject_end: 102,
-                cpg_kdiv: 0.2,
-                pident: 0.0,
+                score: 710,
+                target: "Chompy-2a_tua".to_string(),
+                query: "Chompy-2a_tua".to_string(),
+                query_len: 79,
+                query_start: 1,
+                query_end: 79,
+                subject_len: 79,
+                subject_start: 1,
+                subject_end: 79,
+                cpg_kdiv: 0.0,
+                pident: 100.0,
+            }
+        );
+
+        let last = alignments.last().unwrap();
+        assert_eq!(
+            last,
+            &RmBlastOutput {
+                score: 409,
+                target: "Harbinger-3-L_tua".to_string(),
+                query: "tuafam018707_consensus".to_string(),
+                query_len: 6639,
+                query_start: 5945,
+                query_end: 6261,
+                subject_len: 1898,
+                subject_start: 173,
+                subject_end: 497,
+                cpg_kdiv: 41.17,
+                pident: 54.571,
             }
         );
 

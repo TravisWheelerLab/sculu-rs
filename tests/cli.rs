@@ -4,13 +4,10 @@ use predicates::prelude::*;
 use tempfile::tempdir;
 
 const PRG: &str = "sculu";
-const MATRIX: &str = "tests/inputs/matrices/25p41g.matrix";
 
 struct RunArgs<'a> {
     consensi: &'a str,
     instances: &'a str,
-    independence: &'a str,
-    confidence: &'a str,
 }
 
 // --------------------------------------------------
@@ -31,8 +28,6 @@ fn run1() -> Result<()> {
     run(RunArgs {
         consensi: "tests/inputs/consensi.fa",
         instances: "tests/inputs/instances",
-        independence: ".8",
-        confidence: "3",
     })
 }
 
@@ -44,16 +39,15 @@ fn run(args: RunArgs) -> Result<()> {
     let outname = outfile.to_string_lossy().to_string();
 
     let args = vec![
+        "run",
+        "--alphabet",
+        "dna",
         "--consensi",
         args.consensi,
         "--instances",
         args.instances,
-        "--independence-threshold",
-        args.independence,
-        "--confidence-margin",
-        args.confidence,
-        "--align-matrix",
-        MATRIX,
+        "--config",
+        "tests/inputs/sculu.toml",
         "--outfile",
         &outname,
         "--outdir",
