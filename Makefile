@@ -35,10 +35,10 @@ concat:
 		--components out-test/component-0/final.fa
 
 mfs:
-	cargo run -- \
+	cargo run -- --logfile   - \
+		run \
 		--config    sculu.toml \
 		--alphabet  protein \
-		--logfile   - \
 		--outdir    out-mfs \
 		--consensi  ~/wheelerlab/data/proteins/mfs/consensi.fa \
 		--instances ~/wheelerlab/data/proteins/mfs/instances 

@@ -37,20 +37,20 @@ fn run(args: Cli) -> Result<()> {
         })
         .init();
 
-    match &args.command {
-        Some(Command::Config(args)) => {
+    match &args.command.expect("Missing command") {
+        Command::Config(args) => {
             sculu::write_config(args)?;
             Ok(())
         }
-        Some(Command::Components(args)) => {
+        Command::Components(args) => {
             sculu::build_components(args, num_threads)?;
             Ok(())
         }
-        Some(Command::Cluster(args)) => {
+        Command::Cluster(args) => {
             sculu::process_component(args, num_threads)?;
             Ok(())
         }
-        Some(Command::Concat(args)) => {
+        Command::Concat(args) => {
             sculu::concat_files(
                 &args.consensi,
                 &args.singletons,
@@ -59,7 +59,7 @@ fn run(args: Cli) -> Result<()> {
             )?;
             Ok(())
         }
-        Some(Command::Run(args)) => {
+        Command::Run(args) => {
             let built_components = sculu::build_components(
                 &ComponentsArgs {
                     alphabet: args.alphabet.clone(),
@@ -97,6 +97,5 @@ fn run(args: Cli) -> Result<()> {
 
             Ok(())
         }
-        _ => unreachable!(),
     }
 }
