@@ -174,6 +174,10 @@ pub struct ClusterArgs {
     #[arg(short, long, value_name = "ALPHABET", required = true)]
     pub alphabet: SequenceAlphabet,
 
+    /// The alignment.tsv file from "components"
+    #[arg(long, value_name = "ALIGNMENTS", required = true)]
+    pub alignments: PathBuf,
+
     /// The filtered FASTA consensi from "components"
     #[arg(long, value_name = "CONSENSI", required = true)]
     pub consensi: PathBuf,
@@ -304,12 +308,14 @@ struct Independence {
 #[derive(Debug)]
 pub struct Components {
     pub singletons: Option<PathBuf>,
+    pub alignments: PathBuf,
     pub components: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
 pub struct BuiltComponents {
     pub singletons: Option<PathBuf>,
+    pub alignments: PathBuf,
     pub components: Vec<PathBuf>,
     pub consensi: PathBuf,
     pub instances_dir: PathBuf,
@@ -453,6 +459,7 @@ pub fn build_components(
     Ok(BuiltComponents {
         singletons: components.singletons,
         components: components.components,
+        alignments: components.alignments,
         consensi: consensi_file,
         instances_dir: taken_instances_dir,
     })
@@ -482,6 +489,7 @@ pub fn process_component(args: &ClusterArgs, num_threads: usize) -> Result<PathB
         &args.consensi,
         family_to_instance,
         &args.instances,
+        &args.alignments,
         &config,
         num_threads,
     )?;
@@ -642,6 +650,7 @@ pub fn align_consensi_to_self(
     }
 
     let mut singletons: Option<PathBuf> = None;
+    let mut alignments: Option<PathBuf> = None;
     let mut components = vec![];
     let entries = fs::read_dir(&components_dir).map_err(|e| {
         anyhow!(r#"Failed to read "{}": {e}"#, components_dir.display())
@@ -654,10 +663,14 @@ pub fn align_consensi_to_self(
 
         if file_name == "singletons" {
             singletons = Some(path)
+        } else if file_name == "alignment.tsv" {
+            alignments = Some(path)
         } else if file_name.starts_with("component-") {
             components.push((file_name, path))
         }
     }
+
+    let alignments = alignments.expect("Failed to find 'alignments.tsv'");
 
     // Sort by name, and the files are named in order of increasing size
     components.sort_by_key(|t| t.0.clone());
@@ -665,6 +678,7 @@ pub fn align_consensi_to_self(
     Ok(Components {
         singletons,
         components: components.into_iter().map(|(_name, path)| path).collect(),
+        alignments,
     })
 }
 
@@ -764,6 +778,7 @@ fn merge_component(
     consensi_file: &Path,
     mut family_to_instance: HashMap<String, PathBuf>,
     taken_instances_dir: &PathBuf,
+    alignments: &PathBuf,
     config: &Config,
     num_threads: usize,
 ) -> Result<PathBuf> {
@@ -773,13 +788,11 @@ fn merge_component(
     let families = read_lines(&component_file.to_path_buf())?;
 
     // Get the alignments underlying this component
-    let component_dir = component_file.parent().expect("Failed to get parent dir");
-    let alignment_path = component_dir.join("alignment.tsv");
     let mut alignment_reader = ReaderBuilder::new()
         .delimiter(b'\t')
         .has_headers(true)
-        .from_path(&alignment_path)
-        .map_err(|e| anyhow!("Failed to read '{}': {e}", &alignment_path.display()))?;
+        .from_path(&alignments)
+        .map_err(|e| anyhow!("Failed to read '{}': {e}", &alignments.display()))?;
 
     let mut flipped_pairs: HashSet<StringPair> = HashSet::new();
     for res in alignment_reader.records() {

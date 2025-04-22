@@ -77,6 +77,7 @@ fn run(args: Cli) -> Result<()> {
                     &ClusterArgs {
                         alphabet: args.alphabet.clone(),
                         consensi: built_components.consensi.clone(),
+                        alignments: built_components.alignments.clone(),
                         instances: built_components.instances_dir.clone(),
                         outdir: args.outdir.clone(),
                         config: args.config.clone(),
