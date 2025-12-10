@@ -1381,9 +1381,8 @@ fn call_winners(
             let val = conf[i];
             let others: Vec<_> =
                 pos.iter().filter(|&&j| j != i).map(|&j| conf[j]).collect();
-            let pairs: Vec<_> = std::iter::repeat_n(val, others.len())
-                .zip(others)
-                .collect();
+            let pairs: Vec<_> =
+                std::iter::repeat_n(val, others.len()).zip(others).collect();
             let comps: Vec<_> = pairs
                 .iter()
                 .map(|(x, y)| (x * (1. / confidence_margin as f64)) > *y)
@@ -2002,7 +2001,7 @@ fn merge_families(
     let new_family_path = tempfile::Builder::new()
         .prefix("inst-")
         .suffix(".fa")
-        .keep(true)
+        .disable_cleanup(true)
         .tempfile_in(args.taken_instances_dir)?
         .path()
         .to_path_buf();
@@ -2176,8 +2175,9 @@ fn msa_dna(input_file: &Path, num_threads: usize) -> Result<PathBuf> {
         format_seconds(start.elapsed().as_secs())
     );
 
-    let outdir = input_file.parent().unwrap_or_else(|| panic!("Failed to get parent dir for {}",
-        input_file.display()));
+    let outdir = input_file.parent().unwrap_or_else(|| {
+        panic!("Failed to get parent dir for {}", input_file.display())
+    });
     let consensus_path = outdir.join("msa-input.fa.refiner_cons");
     if !consensus_path.exists() {
         bail!(
