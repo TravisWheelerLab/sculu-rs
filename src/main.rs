@@ -89,7 +89,7 @@ fn run(args: Cli) -> Result<()> {
                 merged.push(res);
             }
 
-            let _ = sculu::concat_files(
+            sculu::concat_files(
                 &built_components.consensi,
                 &built_components.singletons,
                 &merged,

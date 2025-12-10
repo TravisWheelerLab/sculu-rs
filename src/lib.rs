@@ -421,7 +421,7 @@ pub fn build_components(
     num_threads: usize,
 ) -> Result<BuiltComponents> {
     let config = match args.config.as_ref() {
-        Some(file) => get_config(&file)?,
+        Some(file) => get_config(file)?,
         _ => default_config(),
     };
 
@@ -469,7 +469,7 @@ pub fn build_components(
 pub fn process_component(args: &ClusterArgs, num_threads: usize) -> Result<PathBuf> {
     let component_file = &args.component;
     let config = match args.config.as_ref() {
-        Some(file) => get_config(&file)?,
+        Some(file) => get_config(file)?,
         _ => default_config(),
     };
 
@@ -485,7 +485,7 @@ pub fn process_component(args: &ClusterArgs, num_threads: usize) -> Result<PathB
     let merged = merge_component(
         &args.outdir,
         &args.alphabet,
-        &component_file,
+        component_file,
         &args.consensi,
         family_to_instance,
         &args.instances,
@@ -510,10 +510,10 @@ pub fn concat_files(
     merged: &Vec<PathBuf>,
     outfile: &PathBuf,
 ) -> Result<()> {
-    let mut fasta_writer = FastaWriter::new(BufWriter::new(open_for_write(&outfile)?));
+    let mut fasta_writer = FastaWriter::new(BufWriter::new(open_for_write(outfile)?));
 
     if let Some(file) = singletons {
-        let singletons = read_lines(&file)?;
+        let singletons = read_lines(file)?;
         debug!(
             "Copying {} sequences from singletons file",
             singletons.len()
@@ -523,7 +523,7 @@ pub fn concat_files(
 
     for component_file in merged {
         debug!(r#"Copying from "{}""#, component_file.display());
-        let mut reader = FastaReader::new(BufReader::new(open(&component_file)?));
+        let mut reader = FastaReader::new(BufReader::new(open(component_file)?));
         for record in reader.records().map_while(Result::ok) {
             fasta_writer.write_record(&record)?;
         }
@@ -791,7 +791,7 @@ fn merge_component(
     let mut alignment_reader = ReaderBuilder::new()
         .delimiter(b'\t')
         .has_headers(true)
-        .from_path(&alignments)
+        .from_path(alignments)
         .map_err(|e| anyhow!("Failed to read '{}': {e}", &alignments.display()))?;
 
     let mut flipped_pairs: HashSet<StringPair> = HashSet::new();
@@ -1066,7 +1066,7 @@ fn parse_alignment(blast_out: &PathBuf) -> Result<Vec<RmBlastOutput>> {
     let mut reader = ReaderBuilder::new()
         .delimiter(b'\t')
         .has_headers(false)
-        .from_path(&blast_out)
+        .from_path(blast_out)
         .map_err(|e| anyhow!("Failed to read '{}': {e}", &blast_out.display()))?;
 
     let mut records = vec![];
@@ -1353,7 +1353,7 @@ fn call_winners(
     let mut reader = ReaderBuilder::new()
         .delimiter(b'\t')
         .has_headers(true)
-        .from_path(&scores_file)
+        .from_path(scores_file)
         .map_err(|e| anyhow!("Failed to read '{}': {e}", &scores_file.display()))?;
     let records = reader.deserialize();
 
@@ -1381,8 +1381,7 @@ fn call_winners(
             let val = conf[i];
             let others: Vec<_> =
                 pos.iter().filter(|&&j| j != i).map(|&j| conf[j]).collect();
-            let pairs: Vec<_> = std::iter::repeat(val)
-                .take(others.len())
+            let pairs: Vec<_> = std::iter::repeat_n(val, others.len())
                 .zip(others)
                 .collect();
             let comps: Vec<_> = pairs
@@ -1444,7 +1443,7 @@ fn cat_sequences(
     outpath: &PathBuf,
 ) -> Result<()> {
     let mut output = open_for_write(outpath)?;
-    let entries = fs::read_dir(&instances_dir)
+    let entries = fs::read_dir(instances_dir)
         .map_err(|e| anyhow!(r#"Failed to read "{}": {e}"#, instances_dir.display()))?;
 
     for entry in entries {
@@ -1492,7 +1491,7 @@ fn check_family_instances(
     debug!("Checking consensi_file '{}'", consensi.display());
 
     // Find all the input instance files
-    let instances: Vec<_> = fs::read_dir(&instances_dir)
+    let instances: Vec<_> = fs::read_dir(instances_dir)
         .map_err(|e| anyhow!(r#"Failed to read "{}": {e}"#, instances_dir.display()))?
         .map_while(Result::ok)
         .collect();
@@ -1515,7 +1514,7 @@ fn check_family_instances(
             if !family_name.starts_with(".") {
                 let taken_path = taken_instances_dir.join(format!("{family_name}.fa"));
                 if let Err(e) = select_instances(
-                    &consensi,
+                    consensi,
                     &family_name,
                     &instance_path,
                     &taken_path,
@@ -1546,7 +1545,7 @@ fn check_family_instances(
     // Create a new consensi file containing only the families that have instances
     let taken_consensi_path = out_dir.join("consensi.fa");
     let mut out_consensi = open_for_write(&taken_consensi_path)?;
-    let mut reader = parse_reader(open(&consensi)?)?;
+    let mut reader = parse_reader(open(consensi)?)?;
     let mut consensi_names: HashMap<String, u32> = HashMap::new();
     while let Some(rec) = reader.iter_record()? {
         let family = rec.head().to_string();
@@ -1851,7 +1850,7 @@ fn extract_scores(
     let mut align_reader = ReaderBuilder::new()
         .delimiter(b'\t')
         .has_headers(false)
-        .from_path(&alignment_file)
+        .from_path(alignment_file)
         .map_err(|e| anyhow!("Failed to read '{}': {e}", &alignment_file.display()))?;
 
     let records = align_reader.records();
@@ -2177,10 +2176,8 @@ fn msa_dna(input_file: &Path, num_threads: usize) -> Result<PathBuf> {
         format_seconds(start.elapsed().as_secs())
     );
 
-    let outdir = input_file.parent().expect(&format!(
-        "Failed to get parent dir for {}",
-        input_file.display()
-    ));
+    let outdir = input_file.parent().unwrap_or_else(|| panic!("Failed to get parent dir for {}",
+        input_file.display()));
     let consensus_path = outdir.join("msa-input.fa.refiner_cons");
     if !consensus_path.exists() {
         bail!(
